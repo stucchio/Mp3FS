@@ -29,16 +29,8 @@ main :: IO ()
 main = do
   args <- getArgs
   rootdir <- getAbsoluteRoot (head args)
-  config <- return $ Mp3fsConfig {rootdir = rootdir, builtFiles = empty }
-  internal <- initInternalData ()
-  withArgs (tail args) (fuseMain (mp3fsOps config internal) defaultExceptionHandler)
-
-data Mp3fsConfig = Mp3fsConfig {
-                                rootdir :: FilePath,
-                                builtFiles :: Map FilePath FilePath
-                               } deriving (Show)
-
-
+  internal <- initInternalData rootdir
+  withArgs (tail args) (fuseMain (mp3fsOps internal) defaultExceptionHandler)
 
 data ConvertedFile = ConvertedFile { -- The data type of a file which we have
                                      name :: FilePath,
@@ -59,20 +51,22 @@ instance Show ConvertedFile where
     show ConvertedFile { name = nm, handle = Just h } = "Converted file: { name = " ++ nm ++ ", has handle}"
 
 data Mp3fsInternalData = Mp3fsInternalData {
+                                            rootdir :: FilePath,
                                             convertedFiles :: MVar (Map FilePath ConvertedFile ),
                                             tempdir :: FilePath,
                                             tempfilecount :: MVar Int
                                             }
 
-initInternalData :: () -> IO Mp3fsInternalData
-initInternalData () = do
+initInternalData :: FilePath -> IO Mp3fsInternalData
+initInternalData root = do
   convfiles <- newMVar (fromList [])
   mainTempDir <- getTemporaryDirectory
   dir <- mkdtemp (combine mainTempDir "mp3fsXXXXXX")
   count <- newMVar 0
   return Mp3fsInternalData { convertedFiles = convfiles,
                              tempdir = dir,
-                             tempfilecount = count
+                             tempfilecount = count,
+                             rootdir = root
                            }
 
 getNextTempCount :: Mp3fsInternalData -> IO Int
@@ -88,15 +82,15 @@ getAbsoluteRoot rootdir = -- Turns the rootdir into an absolute path. If rootdir
           pwd <- getEnv "PWD"
           return $ (combine pwd rootdir)
 
-mp3fsOps :: Mp3fsConfig -> Mp3fsInternalData -> FuseOperations HT
-mp3fsOps config internal = defaultFuseOps { fuseGetFileStat = mp3GetFileStat config internal
-                                            , fuseRead        = mp3Read config internal
-                                            , fuseOpen        = mp3OpenFile config internal
-                                            , fuseOpenDirectory = mp3OpenDirectory
-                                            , fuseReadDirectory = \x -> runReaderT (mp3ReadDirectory x) config
-                                            , fuseGetFileSystemStats = helloGetFileSystemStats
-                                            , fuseDestroy = mp3Destroy config internal
-                                          }
+mp3fsOps :: Mp3fsInternalData -> FuseOperations HT
+mp3fsOps internal = defaultFuseOps { fuseGetFileStat = mp3GetFileStat internal
+                                   , fuseRead        = mp3Read internal
+                                   , fuseOpen        = mp3OpenFile internal
+                                   , fuseOpenDirectory = mp3OpenDirectory
+                                   , fuseReadDirectory = \x -> runReaderT (mp3ReadDirectory x) internal
+                                   , fuseGetFileSystemStats = helloGetFileSystemStats
+                                   , fuseDestroy = mp3Destroy internal
+                                   }
 
 helloString :: B.ByteString
 helloString = B.pack "Hello World, HFuse!\n"
@@ -140,12 +134,11 @@ fileStat ctx = FileStat { statEntryType = RegularFile
                         , statStatusChangeTime = 0
                         }
 
-mp3OpenFile ::  Mp3fsConfig -> Mp3fsInternalData -> FilePath -> OpenMode -> OpenFileFlags -> IO (Either Errno HT)
-mp3OpenFile _ _ path WriteOnly _ = return (Left ePERM)
-mp3OpenFile _ _ _    ReadWrite _ = return (Left ePERM)
-mp3OpenFile config internal path ReadOnly flags  = do
-  convertedFile <- getConvertedFile config internal path
-  putStrLn ("Opened file " ++ path ++ (show convertedFile) )
+mp3OpenFile ::  Mp3fsInternalData -> FilePath -> OpenMode -> OpenFileFlags -> IO (Either Errno HT)
+mp3OpenFile _ path WriteOnly _ = return (Left ePERM)
+mp3OpenFile _ _    ReadWrite _ = return (Left ePERM)
+mp3OpenFile internal path ReadOnly flags  = do
+  convertedFile <- getConvertedFile internal path
   ecode <- (exitCode convertedFile)
   return ecode
     where
@@ -167,8 +160,8 @@ convertedFileStat ConvertedFile { convertedPath = cp, complete = c} =
     where
       statusOfExistingFile = getFileStatus cp >>= \status -> return (Right (fileStatusToFileStat status))
 
-mp3GetFileStat :: Mp3fsConfig -> Mp3fsInternalData -> FilePath -> IO (Either Errno FileStat)
-mp3GetFileStat config internal path =
+mp3GetFileStat :: Mp3fsInternalData -> FilePath -> IO (Either Errno FileStat)
+mp3GetFileStat internal path =
     do
       isdir <- doesDirectoryExist pathToFile
       if isdir
@@ -178,11 +171,11 @@ mp3GetFileStat config internal path =
                return (Right (fileStatusToFileStat status) )
          else
              do
-               convFile <- getConvertedFile config internal path
+               convFile <- getConvertedFile internal path
                stat <- convertedFileStat convFile
                return stat
     where
-      pathToFile = (makeAbsPathRelativeToRoot config path)
+      pathToFile = (makeAbsPathRelativeToRoot internal path)
 
 
 mp3OpenDirectory _ = return eOK
@@ -217,12 +210,12 @@ fileStatusToFileStat status =
 
 prependRootDirToList rootdir lst = map (combine rootdir) lst
 
-makeAbsPathRelativeToRoot config path = (combine root (makeRelative "/" path) )
-                                        where
-                                          root = (rootdir config)
+makeAbsPathRelativeToRoot internal path = (combine root (makeRelative "/" path) )
+    where
+      root = (rootdir internal)
 
-convertMp3 :: Mp3fsConfig -> Mp3fsInternalData -> FilePath -> IO ConvertedFile
-convertMp3 config internal path =
+convertMp3 :: Mp3fsInternalData -> FilePath -> IO ConvertedFile
+convertMp3 internal path =
     do
       handle <- openFile path ReadMode
       mvb <- newMVar True
@@ -231,7 +224,7 @@ convertMp3 config internal path =
     \e -> return ConversionFailure
 
 
-makeConverter convertFile config internal path =
+makeConverter convertFile internal path =
     do
       nextFileCount <- getNextTempCount internal
       (finalPath, finalHandle) <- openTempFile td (((dropExtension . takeFileName) path ) ++ ".mp3")
@@ -247,7 +240,7 @@ convertOgg uses oggdec and lame to convert an ogg to mp3. Roughly equivalent to 
 oggdec file.ogg
 lame --preset 192 -ms -h file.wav
 -}
-convertOgg :: Mp3fsConfig -> Mp3fsInternalData -> FilePath -> IO ConvertedFile
+convertOgg :: Mp3fsInternalData -> FilePath -> IO ConvertedFile
 convertOgg = makeConverter convertFile
     where
       convertFile basefile finalpath finalHandle mvb =
@@ -262,7 +255,7 @@ convertOgg = makeConverter convertFile
           where
             wavPath = replaceExtension finalpath ".wav"
 
-convertWav :: Mp3fsConfig -> Mp3fsInternalData -> FilePath -> IO ConvertedFile
+convertWav :: Mp3fsInternalData -> FilePath -> IO ConvertedFile
 convertWav = makeConverter convertFile
     where
       convertFile basefile finalpath finalHandle mvb =
@@ -276,7 +269,7 @@ musicConverters = fromList [ (".ogg", convertOgg ), (".mp3", convertMp3 ), (".wa
 musicExtensions = keys musicConverters
 mp3FormatExtension = ".mp3"
 
-getConvertedFile config internal filepath =
+getConvertedFile internal filepath =
     do
       convertedfilemap <- takeMVar (convertedFiles internal)
       if (member filepath convertedfilemap)
@@ -291,12 +284,12 @@ getConvertedFile config internal filepath =
                          return FileDoesNotExist
                    else
                        do
-                         convertedFile <- (musicConverters ! (takeExtension (head pathsToCheck))) config internal (head pathsToCheck)
+                         convertedFile <- (musicConverters ! (takeExtension (head pathsToCheck))) internal (head pathsToCheck)
                          putbackfilemap (insert filepath convertedFile convertedfilemap)
                          return convertedFile
     where
       putbackfilemap = putMVar (convertedFiles internal)
-      possiblePaths = map (\x -> replaceExtension ((makeAbsPathRelativeToRoot config) filepath) x) musicExtensions
+      possiblePaths = map (\x -> replaceExtension ((makeAbsPathRelativeToRoot internal) filepath) x) musicExtensions
 
 
 isMusicFileOrDir :: FilePath -> IO Bool
@@ -312,12 +305,12 @@ isFilePathDirectory x = doesDirectoryExist x
 filterMusicFiles :: FilePath -> [FilePath] -> IO [FilePath]
 filterMusicFiles rootdir filenames = filterM (\file -> isMusicFile (combine rootdir file)) filenames
 
-mp3ReadDirectory :: FilePath -> ReaderT Mp3fsConfig IO (Either Errno [(FilePath, FileStat)])
+mp3ReadDirectory :: FilePath -> ReaderT Mp3fsInternalData IO (Either Errno [(FilePath, FileStat)])
 mp3ReadDirectory path = do
-  config <- ask
+  internal <- ask
   root <- (liftM rootdir) ask
   ctx <- liftIO $ getFuseContext
-  basePathToRead <- return $ makeAbsPathRelativeToRoot config path
+  basePathToRead <- return $ makeAbsPathRelativeToRoot internal path
   baseDirectoryContents <- liftIO $ (getDirectoryContents basePathToRead )
   musicContents <- liftIO $ filterMusicFiles basePathToRead baseDirectoryContents
   dirContents <- liftIO $ filterM (\x -> isFilePathDirectory (combine root x)) baseDirectoryContents
@@ -330,10 +323,10 @@ mp3ReadDirectory path = do
         musicFileStatus x = getFileStatus x >>= \s -> return (replaceExtension (takeFileName x) mp3FormatExtension, fileStatusToFileStat s )
 
 
-mp3Read :: Mp3fsConfig -> Mp3fsInternalData -> FilePath -> HT -> ByteCount -> FileOffset -> IO (Either Errno B.ByteString)
-mp3Read config internal path _ byteCount offset =
+mp3Read :: Mp3fsInternalData -> FilePath -> HT -> ByteCount -> FileOffset -> IO (Either Errno B.ByteString)
+mp3Read internal path _ byteCount offset =
     do
-      convFile <- getConvertedFile config internal path
+      convFile <- getConvertedFile internal path
       if ((takeExtension basePath) == mp3FormatExtension)
         then do
               putStrLn ("          READING FROM " ++ path)
@@ -344,7 +337,7 @@ mp3Read config internal path _ byteCount offset =
               return $ Right bytes
         else return $ Left eNOENT
     where
-      basePath = makeAbsPathRelativeToRoot config path
+      basePath = makeAbsPathRelativeToRoot internal path
 
 --THIS IS NOT REMOTELY FINISHED
 {-
@@ -378,6 +371,6 @@ helloGetFileSystemStats str =
     , fsStatMaxNameLength = 255
     }
 
-mp3Destroy config internal =
+mp3Destroy internal =
     do
       removeRecursiveSafely (tempdir internal)
