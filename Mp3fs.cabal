@@ -1,0 +1,23 @@
+Name:		Mp3fs
+Version:	0.1
+Cabal-Version:  >= 1.2
+License:	GPL
+License-File:	LICENSE
+Author:		Chris Stucchio
+Homepage:	http://http://bitbucket.org/stucchio/mp3fs/
+Category:	Music
+Synopsis:	A filesystem which translates music into mp3 files.
+
+Executable mp3fs
+  Main-Is:         mp3fs.hs
+  Build-Depends:   base,
+                   Unixutils >= 1.2.2,
+                   HFuse >= 0.2.1,
+                   mtl,
+                   bytestring,
+                   containers,
+                   process,
+                   directory,
+                   filepath,
+                   unix
+  Hs-Source-Dirs:  .
