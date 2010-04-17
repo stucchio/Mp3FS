@@ -152,18 +152,20 @@ mp3OpenFile config internal path ReadOnly flags  = do
       exitCode ConversionFailure = return (Left eNOENT)
       exitCode cf = (getConvertedHandle cf) >> return (Right ());
 
+whenFileExists filename ifExist ifNotExist =
+    do
+      exists <- fileExist filename
+      if exists
+         then ifExist
+         else return ifNotExist
+
 convertedFileStat ConversionFailure = return (Left eNOENT)
 convertedFileStat ConvertedFile { convertedPath = cp, complete = c} =
     do
       readMVar c
-      exists <- fileExist cp
-      if exists
-         then
-             do
-               status <- getFileStatus cp
-               return (Right (fileStatusToFileStat status))
-         else
-             return (Left eNOENT)
+      whenFileExists cp statusOfExistingFile (Left eNOENT)
+    where
+      statusOfExistingFile = getFileStatus cp >>= \status -> return (Right (fileStatusToFileStat status))
 
 mp3GetFileStat :: Mp3fsConfig -> Mp3fsInternalData -> FilePath -> IO (Either Errno FileStat)
 mp3GetFileStat config internal path =
@@ -228,14 +230,8 @@ convertMp3 config internal path =
     `catch`
     \e -> return ConversionFailure
 
-{-
-convertOgg uses oggdec and lame to convert an ogg to mp3. Roughly equivalent to the following shell commands:
 
-oggdec file.ogg
-lame --preset 192 -ms -h file.wav
--}
-convertOgg :: Mp3fsConfig -> Mp3fsInternalData -> FilePath -> IO ConvertedFile
-convertOgg config internal path =
+makeConverter convertFile config internal path =
     do
       nextFileCount <- getNextTempCount internal
       (finalPath, finalHandle) <- openTempFile td (((dropExtension . takeFileName) path ) ++ ".mp3")
@@ -244,20 +240,39 @@ convertOgg config internal path =
       return ConvertedFile { name=path, handle = Just finalHandle, convertedPath = finalPath, complete = mvb}
     where
       td = tempdir internal
-      pipeName i = addExtension (combine td ("conversionPipe" ++ ( show i))) ".wav"
+
+{-
+convertOgg uses oggdec and lame to convert an ogg to mp3. Roughly equivalent to the following shell commands:
+
+oggdec file.ogg
+lame --preset 192 -ms -h file.wav
+-}
+convertOgg :: Mp3fsConfig -> Mp3fsInternalData -> FilePath -> IO ConvertedFile
+convertOgg = makeConverter convertFile
+    where
       convertFile basefile finalpath finalHandle mvb =
           do
             createNamedPipe wavPath (unionFileModes ownerReadMode ownerWriteMode)
             forkIO ((system ("oggdec " ++ basefile ++ " -o " ++ wavPath)) >> return ())
             system ("lame  " ++ wavPath ++ " " ++ finalpath)
-            removeLink (replaceExtension finalpath ".wav")
+            removeLink wavPath
             hSeek finalHandle AbsoluteSeek 0
             putMVar mvb True
             return ()
           where
             wavPath = replaceExtension finalpath ".wav"
 
-musicConverters = fromList [ (".ogg", convertOgg ), (".mp3", convertMp3 ) ]
+convertWav :: Mp3fsConfig -> Mp3fsInternalData -> FilePath -> IO ConvertedFile
+convertWav = makeConverter convertFile
+    where
+      convertFile basefile finalpath finalHandle mvb =
+          do
+            system ("lame  " ++ basefile ++ " " ++ finalpath)
+            hSeek finalHandle AbsoluteSeek 0
+            putMVar mvb True
+            return ()
+
+musicConverters = fromList [ (".ogg", convertOgg ), (".mp3", convertMp3 ), (".wav", convertWav) ]
 musicExtensions = keys musicConverters
 mp3FormatExtension = ".mp3"
 
