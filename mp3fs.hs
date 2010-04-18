@@ -92,7 +92,7 @@ mp3fsOps internal = defaultFuseOps { fuseGetFileStat = runReaderT1 mp3GetFileSta
                                    , fuseOpenDirectory = runReaderT1 mp3OpenDirectory internal
                                    , fuseReadDirectory = \x -> runReaderT (mp3ReadDirectory x) internal
                                    , fuseGetFileSystemStats = helloGetFileSystemStats
-                                   , fuseDestroy = mp3Destroy internal
+                                   , fuseDestroy = runReaderT mp3Destroy internal
                                    }
 
 helloString :: B.ByteString
@@ -413,6 +413,8 @@ helloGetFileSystemStats str =
     , fsStatMaxNameLength = 255
     }
 
-mp3Destroy internal =
+mp3Destroy =
     do
-      removeRecursiveSafely (tempdir internal)
+      td <- (liftM tempdir) ask
+      liftIO (removeRecursiveSafely td)
+
