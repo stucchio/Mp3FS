@@ -82,10 +82,15 @@ getAbsoluteRoot rootdir = -- Turns the rootdir into an absolute path. If rootdir
           pwd <- getEnv "PWD"
           return $ (combine pwd rootdir)
 
+runReaderT1 f r = \x -> runReaderT (f x) r
+runReaderT2 f r = \x -> \y -> runReaderT (f x y) r
+runReaderT3 f r = \x -> \y -> \z -> runReaderT (f x y z) r
+runReaderT4 f r = \x -> \y -> \z -> \t -> runReaderT (f x y z t) r
+
 mp3fsOps :: Mp3fsInternalData -> FuseOperations HT
 mp3fsOps internal = defaultFuseOps { fuseGetFileStat = mp3GetFileStat internal
                                    , fuseRead        = mp3Read internal
-                                   , fuseOpen        = mp3OpenFile internal
+                                   , fuseOpen        = runReaderT3 mp3OpenFile internal
                                    , fuseOpenDirectory = mp3OpenDirectory
                                    , fuseReadDirectory = \x -> runReaderT (mp3ReadDirectory x) internal
                                    , fuseGetFileSystemStats = helloGetFileSystemStats
@@ -134,12 +139,14 @@ fileStat ctx = FileStat { statEntryType = RegularFile
                         , statStatusChangeTime = 0
                         }
 
-mp3OpenFile ::  Mp3fsInternalData -> FilePath -> OpenMode -> OpenFileFlags -> IO (Either Errno HT)
-mp3OpenFile _ path WriteOnly _ = return (Left ePERM)
-mp3OpenFile _ _    ReadWrite _ = return (Left ePERM)
-mp3OpenFile internal path ReadOnly flags  = do
-  convertedFile <- getConvertedFile internal path
-  ecode <- (exitCode convertedFile)
+
+mp3OpenFile :: FilePath -> OpenMode -> OpenFileFlags -> ReaderT Mp3fsInternalData IO (Either Errno HT)
+mp3OpenFile path WriteOnly _ = return (Left ePERM)
+mp3OpenFile _    ReadWrite _ = return (Left ePERM)
+mp3OpenFile path ReadOnly flags  = do
+  internal <- ask
+  convertedFile <- liftIO (getConvertedFile internal path)
+  ecode <- liftIO (exitCode convertedFile)
   return ecode
     where
       exitCode ConversionFailure = return (Left eNOENT)
