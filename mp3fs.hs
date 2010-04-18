@@ -89,7 +89,7 @@ mp3fsOps :: Mp3fsInternalData -> FuseOperations HT
 mp3fsOps internal = defaultFuseOps { fuseGetFileStat = runReaderT1 mp3GetFileStat internal
                                    , fuseRead        = mp3Read internal
                                    , fuseOpen        = runReaderT3 mp3OpenFile internal
-                                   , fuseOpenDirectory = mp3OpenDirectory
+                                   , fuseOpenDirectory = runReaderT1 mp3OpenDirectory internal
                                    , fuseReadDirectory = \x -> runReaderT (mp3ReadDirectory x) internal
                                    , fuseGetFileSystemStats = helloGetFileSystemStats
                                    , fuseDestroy = mp3Destroy internal
@@ -158,6 +158,7 @@ whenFileExists filename ifExist ifNotExist =
          else return ifNotExist
 
 convertedFileStat ConversionFailure = return (Left eNOENT)
+convertedFileStat FileDoesNotExist = return (Left eNOENT)
 convertedFileStat ConvertedFile { convertedPath = cp, complete = c} =
     do
       readMVar c
@@ -181,8 +182,12 @@ mp3GetFileStat path =
                stat <- liftIO (convertedFileStat convFile)
                return stat
 
-
-mp3OpenDirectory _ = return eOK
+mp3OpenDirectory :: FilePath -> ReaderT Mp3fsInternalData IO Errno
+mp3OpenDirectory path =
+    do
+      basePathToRead <- makeAbsPathRelativeToRootR path
+      isDir <- liftIO (doesDirectoryExist basePathToRead)
+      if isDir then (return eOK) else (return eNOENT)
 
 fileStatusToEntryType :: FileStatus -> EntryType
 fileStatusToEntryType status
@@ -275,7 +280,6 @@ musicConverters = fromList [ (".ogg", convertOgg ), (".mp3", convertMp3 ), (".wa
 musicExtensions = keys musicConverters
 mp3FormatExtension = ".mp3"
 
-
 getConvertedFile internal filepath =
     do
       convertedfilemap <- takeMVar (convertedFiles internal)
@@ -339,20 +343,26 @@ filterMusicFiles rootdir filenames = filterM (\file -> isMusicFile (combine root
 
 mp3ReadDirectory :: FilePath -> ReaderT Mp3fsInternalData IO (Either Errno [(FilePath, FileStat)])
 mp3ReadDirectory path = do
-  internal <- ask
-  root <- (liftM rootdir) ask
-  ctx <- liftIO $ getFuseContext
-  basePathToRead <- return $ makeAbsPathRelativeToRoot internal path
-  baseDirectoryContents <- liftIO $ (getDirectoryContents basePathToRead )
-  musicContents <- liftIO $ filterMusicFiles basePathToRead baseDirectoryContents
-  dirContents <- liftIO $ filterM (\x -> isFilePathDirectory (combine root x)) baseDirectoryContents
-  musicStatus <- liftIO $ (sequence (map musicFileStatus (addBasePath basePathToRead musicContents)))
-  dirStatus <- liftIO $ (sequence (map dirFileStatus (addBasePath basePathToRead dirContents)))
-  return $ Right (musicStatus ++ dirStatus ++ [(".",          dirStat  ctx), ("..",          dirStat  ctx)])
-      where
-        addBasePath bp = (map (combine bp))
-        dirFileStatus x = getFileStatus x >>= \s -> return ( takeFileName x, fileStatusToFileStat s)
-        musicFileStatus x = getFileStatus x >>= \s -> return (replaceExtension (takeFileName x) mp3FormatExtension, fileStatusToFileStat s )
+  basePathToRead <- makeAbsPathRelativeToRootR path
+  exists <- liftIO (doesDirectoryExist basePathToRead)
+  if exists
+     then
+         do
+           root <- (liftM rootdir) ask
+           ctx <- liftIO $ getFuseContext
+           baseDirectoryContents <- liftIO $ (getDirectoryContents basePathToRead )
+           musicContents <- liftIO $ filterMusicFiles basePathToRead baseDirectoryContents
+           dirContents <- liftIO $ filterM (\x -> isFilePathDirectory (combine root x)) baseDirectoryContents
+           musicStatus <- liftIO $ (sequence (map musicFileStatus (addBasePath basePathToRead musicContents)))
+           dirStatus <- liftIO $ (sequence (map dirFileStatus (addBasePath basePathToRead dirContents)))
+           return (Right (musicStatus ++ dirStatus ++ [(".",          dirStat  ctx), ("..",          dirStat  ctx)]))
+     else
+         return (Left eNOENT)
+    where
+      addBasePath bp = (map (combine bp))
+      dirFileStatus x = getFileStatus x >>= \s -> return ( takeFileName x, fileStatusToFileStat s)
+      musicFileStatus x = getFileStatus x >>= \s -> return (replaceExtension (takeFileName x) mp3FormatExtension, fileStatusToFileStat s )
+
 
 
 mp3Read :: Mp3fsInternalData -> FilePath -> HT -> ByteCount -> FileOffset -> IO (Either Errno B.ByteString)
