@@ -145,7 +145,7 @@ mp3OpenFile path WriteOnly _ = return (Left ePERM)
 mp3OpenFile _    ReadWrite _ = return (Left ePERM)
 mp3OpenFile path ReadOnly flags  = do
   internal <- ask
-  convertedFile <- liftIO (getConvertedFile internal path)
+  convertedFile <- getConvertedFileR path
   ecode <- liftIO (exitCode convertedFile)
   return ecode
     where
@@ -217,6 +217,8 @@ fileStatusToFileStat status =
 
 prependRootDirToList rootdir lst = map (combine rootdir) lst
 
+makeAbsPathRelativeToRootR path = ((liftM rootdir) ask) >>= \root -> return (combine root (makeRelative "/" path) )
+
 makeAbsPathRelativeToRoot internal path = (combine root (makeRelative "/" path) )
     where
       root = (rootdir internal)
@@ -276,6 +278,7 @@ musicConverters = fromList [ (".ogg", convertOgg ), (".mp3", convertMp3 ), (".wa
 musicExtensions = keys musicConverters
 mp3FormatExtension = ".mp3"
 
+
 getConvertedFile internal filepath =
     do
       convertedfilemap <- takeMVar (convertedFiles internal)
@@ -297,6 +300,31 @@ getConvertedFile internal filepath =
     where
       putbackfilemap = putMVar (convertedFiles internal)
       possiblePaths = map (\x -> replaceExtension ((makeAbsPathRelativeToRoot internal) filepath) x) musicExtensions
+
+getConvertedFileR :: FilePath -> ReaderT Mp3fsInternalData IO ConvertedFile
+getConvertedFileR filepath =
+    do
+      convertedFilesMVar <- (liftM convertedFiles) ask
+      convertedfilemap <- liftIO (takeMVar convertedFilesMVar)
+      if (member filepath convertedfilemap)
+          then do
+                liftIO (putMVar convertedFilesMVar convertedfilemap)
+                return (convertedfilemap ! filepath)
+          else do
+                absFilePath <- makeAbsPathRelativeToRootR filepath
+                pathsToCheck <- liftIO (filterM fileExist (map (\x -> replaceExtension absFilePath x) musicExtensions))
+                if pathsToCheck == []
+                   then do
+                         liftIO (putMVar convertedFilesMVar convertedfilemap)
+                         return FileDoesNotExist
+                   else
+                       do
+                         internal <- ask
+                         convertedFile <- liftIO ((musicConverters ! (takeExtension (head pathsToCheck))) internal (head pathsToCheck))
+                         liftIO (putMVar convertedFilesMVar (insert filepath convertedFile convertedfilemap))
+                         return convertedFile
+
+
 
 
 isMusicFileOrDir :: FilePath -> IO Bool
