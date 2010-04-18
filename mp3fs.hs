@@ -1,7 +1,5 @@
 module Main where
 
-
-
 import qualified Data.ByteString.Char8 as B
 import Foreign.C.Error
 import System.Posix.Types
@@ -88,7 +86,7 @@ runReaderT3 f r = \x -> \y -> \z -> runReaderT (f x y z) r
 runReaderT4 f r = \x -> \y -> \z -> \t -> runReaderT (f x y z t) r
 
 mp3fsOps :: Mp3fsInternalData -> FuseOperations HT
-mp3fsOps internal = defaultFuseOps { fuseGetFileStat = mp3GetFileStat internal
+mp3fsOps internal = defaultFuseOps { fuseGetFileStat = runReaderT1 mp3GetFileStat internal
                                    , fuseRead        = mp3Read internal
                                    , fuseOpen        = runReaderT3 mp3OpenFile internal
                                    , fuseOpenDirectory = mp3OpenDirectory
@@ -167,22 +165,21 @@ convertedFileStat ConvertedFile { convertedPath = cp, complete = c} =
     where
       statusOfExistingFile = getFileStatus cp >>= \status -> return (Right (fileStatusToFileStat status))
 
-mp3GetFileStat :: Mp3fsInternalData -> FilePath -> IO (Either Errno FileStat)
-mp3GetFileStat internal path =
+mp3GetFileStat :: FilePath -> ReaderT Mp3fsInternalData IO (Either Errno FileStat)
+mp3GetFileStat path =
     do
-      isdir <- doesDirectoryExist pathToFile
+      pathToFile <- makeAbsPathRelativeToRootR path
+      isdir <- liftIO (doesDirectoryExist pathToFile)
       if isdir
          then
              do
-               status <- getFileStatus pathToFile
+               status <- liftIO (getFileStatus pathToFile)
                return (Right (fileStatusToFileStat status) )
          else
              do
-               convFile <- getConvertedFile internal path
-               stat <- convertedFileStat convFile
+               convFile <- getConvertedFileR path
+               stat <- liftIO (convertedFileStat convFile)
                return stat
-    where
-      pathToFile = (makeAbsPathRelativeToRoot internal path)
 
 
 mp3OpenDirectory _ = return eOK
