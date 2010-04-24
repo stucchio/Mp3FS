@@ -1,9 +1,12 @@
 module Mp3fsInternal
     (
-     Mp3fsInternalData (..)
+     Mp3fsInternalData (rootdir, convertedFiles, tempdir)
     , ConvertedFile (..)
+    , Mp3fsM
+    , Mp3ConverterFunc
     , initInternalData
     , getConvertedHandle
+    , getNextTempCount
     ) where
 
 import Control.Concurrent.MVar
@@ -12,11 +15,17 @@ import System.Unix.Directory (mkdtemp, removeRecursiveSafely)
 import System.IO
 import System.FilePath.Posix
 import System.Directory
+import Control.Monad
+import Control.Monad.Reader
 
+
+type Mp3fsM a = ReaderT Mp3fsInternalData IO a
+type Mp3ConverterFunc = FilePath -> Mp3fsM ConvertedFile
 
 data Mp3fsInternalData = Mp3fsInternalData {
                                             rootdir :: FilePath,
                                             convertedFiles :: MVar (Map FilePath ConvertedFile ),
+                                            converters :: Map String Mp3ConverterFunc,
                                             tempdir :: FilePath,
                                             tempfilecount :: MVar Int
                                             }
@@ -39,17 +48,22 @@ getConvertedHandle ConvertedFile { handle = Just h, complete = c} = (readMVar c)
 getConvertedHandle ConvertedFile { handle = Nothing, convertedPath = cp, complete = c } = (readMVar c) >> openFile cp ReadMode
 
 
-initInternalData :: FilePath -> IO Mp3fsInternalData
-initInternalData root = do
+initInternalData :: FilePath -> Map String Mp3ConverterFunc -> IO Mp3fsInternalData
+initInternalData root converters = do
   convfiles <- newMVar (fromList [])
   mainTempDir <- getTemporaryDirectory
   dir <- mkdtemp (combine mainTempDir "mp3fsXXXXXX")
   count <- newMVar 0
   return Mp3fsInternalData { convertedFiles = convfiles,
                              tempdir = dir,
+                             converters = converters,
                              tempfilecount = count,
                              rootdir = root
                            }
 
-getNextTempCount :: Mp3fsInternalData -> IO Int
-getNextTempCount internal = modifyMVar (tempfilecount internal) (\x -> return (x, x+1) )
+getNextTempCount :: Mp3fsM Int
+getNextTempCount =
+    do
+      countMV <- (liftM tempfilecount) ask
+      result <- liftIO (modifyMVar countMV (\x -> return (x, x+1) ))
+      return result

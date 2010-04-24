@@ -1,4 +1,4 @@
-module Main where
+module Main () where
 
 import Mp3fsInternal
 import Mp3fsConverters
@@ -80,9 +80,6 @@ dirStat ctx = FileStat { statEntryType = Directory
                        , statModificationTime = 0
                        , statStatusChangeTime = 0
                        }
-
-getNextTempCount :: Mp3fsInternalData -> IO Int
-getNextTempCount internal = modifyMVar (tempfilecount internal) (\x -> return (x, x+1) )
 
 
 fileStat ctx = FileStat { statEntryType = RegularFile
@@ -190,60 +187,6 @@ makeAbsPathRelativeToRoot internal path = (combine root (makeRelative "/" path) 
     where
       root = (rootdir internal)
 
-convertMp3 :: Mp3fsInternalData -> FilePath -> IO ConvertedFile
-convertMp3 internal path =
-    do
-      handle <- openFile path ReadMode
-      mvb <- newMVar True
-      return ConvertedFile { handle = Just handle, name = path, complete = mvb, convertedPath = path }
-    `catch`
-    \e -> return ConversionFailure
-
-
-makeConverter convertFile internal path =
-    do
-      nextFileCount <- getNextTempCount internal
-      (finalPath, finalHandle) <- openTempFile td (((dropExtension . takeFileName) path ) ++ ".mp3")
-      mvb <- newEmptyMVar
-      forkIO (convertFile path finalPath finalHandle mvb )
-      return ConvertedFile { name=path, handle = Just finalHandle, convertedPath = finalPath, complete = mvb}
-    where
-      td = tempdir internal
-
-{-
-convertOgg uses oggdec and lame to convert an ogg to mp3. Roughly equivalent to the following shell commands:
-
-oggdec file.ogg
-lame --preset 192 -ms -h file.wav
--}
-convertOgg :: Mp3fsInternalData -> FilePath -> IO ConvertedFile
-convertOgg = makeConverter convertFile
-    where
-      convertFile basefile finalpath finalHandle mvb =
-          do
-            createNamedPipe wavPath (unionFileModes ownerReadMode ownerWriteMode)
-            forkIO ((system ("oggdec " ++ basefile ++ " -o " ++ wavPath)) >> return ())
-            system ("lame  " ++ wavPath ++ " " ++ finalpath)
-            removeLink wavPath
-            hSeek finalHandle AbsoluteSeek 0
-            putMVar mvb True
-            return ()
-          where
-            wavPath = replaceExtension finalpath ".wav"
-
-convertWav :: Mp3fsInternalData -> FilePath -> IO ConvertedFile
-convertWav = makeConverter convertFile
-    where
-      convertFile basefile finalpath finalHandle mvb =
-          do
-            system ("lame  " ++ basefile ++ " " ++ finalpath)
-            hSeek finalHandle AbsoluteSeek 0
-            putMVar mvb True
-            return ()
-
-musicConverters = fromList [ (".ogg", convertOgg ), (".mp3", convertMp3 ), (".wav", convertWav) ]
-musicExtensions = keys musicConverters
-mp3FormatExtension = ".mp3"
 
 getConvertedFile internal filepath =
     do
