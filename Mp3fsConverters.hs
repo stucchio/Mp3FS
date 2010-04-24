@@ -1,6 +1,6 @@
 module Mp3fsConverters
     (
-      Mp3Converter (..)
+     getMp3Converters
     ) where
 
 import Mp3fsInternal
@@ -12,13 +12,14 @@ import System.Posix.Files
 import System.Process
 import Data.Map( fromList, member, empty, Map, (!), insert, keys)
 import Control.Concurrent
+import Control.Monad.Reader
 import Control.Concurrent.MVar
 
 
 
 data Mp3Converter = Mp3Converter {
                                   testIfActive :: () -> IO Bool,
-                                  converterFunc :: Mp3fsInternalData -> FilePath -> IO ConvertedFile
+                                  converterFunc :: FilePath -> Mp3fsM ConvertedFile
                                   }
 
 canFindExecutable prog () =
@@ -31,25 +32,24 @@ canFindExecutable prog () =
 convertMp3 :: FilePath -> Mp3fsM ConvertedFile
 convertMp3 path =
     do
-      handle <- openFile path ReadMode
-      mvb <- newMVar True
-      return ConvertedFile { handle = Just handle, name = path, complete = mvb, convertedPath = path }
-    `catch`
-    \e -> return ConversionFailure
+      handle <- mp3OpenFile path
+      case handle of
+        Nothing -> return ConversionFailure
+        Just h -> do
+          mvb <- liftIO (newMVar True)
+          return ConvertedFile { handle = Just h, name = path, complete = mvb, convertedPath = path }
 
-mp3Converter = Mp3Converter { testIfActive = \() -> True,
+
+mp3Converter = Mp3Converter { testIfActive = \() -> return True,
                               converterFunc = convertMp3
                             }
 
-makeConverter convertFile internal path =
+makeConverter convertFile path =
     do
-      nextFileCount <- getNextTempCount internal
-      (finalPath, finalHandle) <- openTempFile td (((dropExtension . takeFileName) path ) ++ ".mp3")
-      mvb <- newEmptyMVar
-      forkIO (convertFile path finalPath finalHandle mvb )
+      (finalPath, finalHandle) <- mp3GetTempFile
+      mvb <- liftIO newEmptyMVar
+      liftIO (forkIO (convertFile path finalPath finalHandle mvb ))
       return ConvertedFile { name=path, handle = Just finalHandle, convertedPath = finalPath, complete = mvb}
-    where
-      td = tempdir internal
 
 {-
 convertOgg uses oggdec and lame to convert an ogg to mp3. Roughly equivalent to the following shell commands:
@@ -57,7 +57,7 @@ convertOgg uses oggdec and lame to convert an ogg to mp3. Roughly equivalent to 
 oggdec file.ogg
 lame --preset 192 -ms -h file.wav
 -}
-convertOgg :: Mp3fsInternalData -> FilePath -> IO ConvertedFile
+convertOgg :: FilePath -> Mp3fsM ConvertedFile
 convertOgg = makeConverter convertFile
     where
       convertFile basefile finalpath finalHandle mvb =
@@ -72,7 +72,12 @@ convertOgg = makeConverter convertFile
           where
             wavPath = replaceExtension finalpath ".wav"
 
-convertWav :: Mp3fsInternalData -> FilePath -> IO ConvertedFile
+mp3Converter = Mp3Converter { testIfActive = \() -> filterM [canFindExereturn True,
+                              converterFunc = convertMp3
+                            }
+
+
+convertWav :: FilePath -> Mp3fsM ConvertedFile
 convertWav = makeConverter convertFile
     where
       convertFile basefile finalpath finalHandle mvb =
@@ -91,3 +96,5 @@ wavConverter = Mp3Converter { testIfActive = canFindExecutable "lame",
 musicConverters = fromList [ (".ogg", convertOgg ), (".mp3", convertMp3 ), (".wav", convertWav) ]
 musicExtensions = keys musicConverters
 mp3FormatExtension = ".mp3"
+
+getMp3Converters

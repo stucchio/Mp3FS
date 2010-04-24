@@ -4,9 +4,11 @@ module Mp3fsInternal
     , ConvertedFile (..)
     , Mp3fsM
     , Mp3ConverterFunc
+    , mp3TempDir
     , initInternalData
     , getConvertedHandle
-    , getNextTempCount
+    , mp3OpenFile
+    , mp3GetTempFile
     ) where
 
 import Control.Concurrent.MVar
@@ -19,9 +21,6 @@ import Control.Monad
 import Control.Monad.Reader
 
 
-type Mp3fsM a = ReaderT Mp3fsInternalData IO a
-type Mp3ConverterFunc = FilePath -> Mp3fsM ConvertedFile
-
 data Mp3fsInternalData = Mp3fsInternalData {
                                             rootdir :: FilePath,
                                             convertedFiles :: MVar (Map FilePath ConvertedFile ),
@@ -30,12 +29,31 @@ data Mp3fsInternalData = Mp3fsInternalData {
                                             tempfilecount :: MVar Int
                                             }
 
+
 data ConvertedFile = ConvertedFile { -- The data type of a file which we have
                                      name :: FilePath,
                                      convertedPath :: FilePath,
                                      handle :: Maybe Handle,
                                      complete :: MVar Bool
                                    } | ConversionFailure | FileDoesNotExist
+
+type Mp3fsM a = ReaderT Mp3fsInternalData IO a
+type Mp3ConverterFunc = FilePath -> Mp3fsM ConvertedFile
+
+
+mp3TempDir = ask >>= \x -> return (tempdir x)
+
+mp3OpenFile :: FilePath -> Mp3fsM (Maybe Handle)
+mp3OpenFile path = (liftIO getHandle)
+    where
+      getHandle =
+          do
+            h <- (openFile path ReadMode)
+            return (Just h)
+          `catch`
+          \e -> return Nothing
+
+
 
 instance Show ConvertedFile where
     show ConversionFailure = "ConversionFailure"
@@ -67,3 +85,13 @@ getNextTempCount =
       countMV <- (liftM tempfilecount) ask
       result <- liftIO (modifyMVar countMV (\x -> return (x, x+1) ))
       return result
+
+mp3GetTempFile :: Mp3fsM (FilePath, Handle)
+mp3GetTempFile =
+    do
+      count <- getNextTempCount
+      td <- mp3TempDir
+      (finalPath, finalHandle) <- liftIO (openTempFile td ("converted_file_" ++ (show count) ++ ".mp3"))
+      return (finalPath, finalHandle)
+
+
