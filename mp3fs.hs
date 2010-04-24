@@ -1,5 +1,8 @@
 module Main where
 
+import Mp3fsInternal
+import Mp3fsConverters
+
 import qualified Data.ByteString.Char8 as B
 import Foreign.C.Error
 import System.Posix.Types
@@ -16,10 +19,9 @@ import Data.Map( fromList, member, empty, Map, (!), insert, keys)
 import Data.ByteString (hGet)
 import Control.Concurrent.MVar
 import Control.Concurrent
+import Control.Monad
 import Control.Monad.Reader
 
-
-import Control.Monad
 
 type HT = ()
 
@@ -28,47 +30,8 @@ main = do
   args <- getArgs
   rootdir <- getAbsoluteRoot (head args)
   internal <- initInternalData rootdir
+  loc <- findExecutable "lame"
   withArgs (tail args) (fuseMain (mp3fsOps internal) defaultExceptionHandler)
-
-data ConvertedFile = ConvertedFile { -- The data type of a file which we have
-                                     name :: FilePath,
-                                     convertedPath :: FilePath,
-                                     handle :: Maybe Handle,
-                                     complete :: MVar Bool
-                                   } | ConversionFailure | FileDoesNotExist
-
-
-getConvertedHandle ConvertedFile { handle = Just h, complete = c} = (readMVar c) >> return h
-getConvertedHandle ConvertedFile { handle = Nothing, convertedPath = cp, complete = c } = (readMVar c) >> openFile cp ReadMode
-
-
-instance Show ConvertedFile where
-    show ConversionFailure = "ConversionFailure"
-    show FileDoesNotExist = "FileDoesNotExist"
-    show ConvertedFile { name = nm, handle = Nothing } = "Converted file: { name = " ++ nm ++ ", no handle}"
-    show ConvertedFile { name = nm, handle = Just h } = "Converted file: { name = " ++ nm ++ ", has handle}"
-
-data Mp3fsInternalData = Mp3fsInternalData {
-                                            rootdir :: FilePath,
-                                            convertedFiles :: MVar (Map FilePath ConvertedFile ),
-                                            tempdir :: FilePath,
-                                            tempfilecount :: MVar Int
-                                            }
-
-initInternalData :: FilePath -> IO Mp3fsInternalData
-initInternalData root = do
-  convfiles <- newMVar (fromList [])
-  mainTempDir <- getTemporaryDirectory
-  dir <- mkdtemp (combine mainTempDir "mp3fsXXXXXX")
-  count <- newMVar 0
-  return Mp3fsInternalData { convertedFiles = convfiles,
-                             tempdir = dir,
-                             tempfilecount = count,
-                             rootdir = root
-                           }
-
-getNextTempCount :: Mp3fsInternalData -> IO Int
-getNextTempCount internal = modifyMVar (tempfilecount internal) (\x -> return (x, x+1) )
 
 
 getAbsoluteRoot :: FilePath -> IO FilePath
@@ -98,8 +61,6 @@ mp3fsOps internal = defaultFuseOps { fuseGetFileStat = runReaderT1 mp3GetFileSta
 helloString :: B.ByteString
 helloString = B.pack "Hello World, HFuse!\n"
 
-helloPath :: FilePath
-helloPath = "/hello"
 dirStat ctx = FileStat { statEntryType = Directory
                        , statFileMode = foldr1 unionFileModes
                                           [ ownerReadMode
@@ -119,6 +80,10 @@ dirStat ctx = FileStat { statEntryType = Directory
                        , statModificationTime = 0
                        , statStatusChangeTime = 0
                        }
+
+getNextTempCount :: Mp3fsInternalData -> IO Int
+getNextTempCount internal = modifyMVar (tempfilecount internal) (\x -> return (x, x+1) )
+
 
 fileStat ctx = FileStat { statEntryType = RegularFile
                         , statFileMode = foldr1 unionFileModes

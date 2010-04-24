@@ -7,6 +7,8 @@ Author:		Chris Stucchio
 Homepage:	http://http://bitbucket.org/stucchio/mp3fs/
 Category:	Music
 Synopsis:	A filesystem which translates music into mp3 files.
+Build-type:     Simple
+Stability:      Experimental
 
 Executable mp3fs
   Main-Is:         mp3fs.hs
@@ -21,3 +23,5 @@ Executable mp3fs
                    filepath,
                    unix
   Hs-Source-Dirs:  .
+  ghc-options:     -threaded
+
