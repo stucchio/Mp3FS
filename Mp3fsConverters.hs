@@ -1,6 +1,7 @@
 module Mp3fsConverters
     (
      getMp3Converters
+    , mp3FormatExtension
     ) where
 
 import Mp3fsInternal
@@ -18,11 +19,12 @@ import Control.Concurrent.MVar
 
 
 data Mp3Converter = Mp3Converter {
+                                  ext :: String,
                                   testIfActive :: () -> IO Bool,
                                   converterFunc :: FilePath -> Mp3fsM ConvertedFile
                                   }
 
-canFindExecutable prog () =
+canFindExecutable prog =
     do
       execLoc <- findExecutable prog
       case execLoc of
@@ -32,7 +34,7 @@ canFindExecutable prog () =
 convertMp3 :: FilePath -> Mp3fsM ConvertedFile
 convertMp3 path =
     do
-      handle <- mp3OpenFile path
+      handle <- getFileHandleOrNothing path
       case handle of
         Nothing -> return ConversionFailure
         Just h -> do
@@ -40,7 +42,8 @@ convertMp3 path =
           return ConvertedFile { handle = Just h, name = path, complete = mvb, convertedPath = path }
 
 
-mp3Converter = Mp3Converter { testIfActive = \() -> return True,
+mp3Converter = Mp3Converter { ext = ".mp3",
+                              testIfActive = \() -> return True,
                               converterFunc = convertMp3
                             }
 
@@ -48,7 +51,8 @@ makeConverter convertFile path =
     do
       (finalPath, finalHandle) <- mp3GetTempFile
       mvb <- liftIO newEmptyMVar
-      liftIO (forkIO (convertFile path finalPath finalHandle mvb ))
+      internal <- ask
+      liftIO (forkIO ((runMp3fsM4 convertFile internal) path finalPath finalHandle mvb ))
       return ConvertedFile { name=path, handle = Just finalHandle, convertedPath = finalPath, complete = mvb}
 
 {-
@@ -62,17 +66,18 @@ convertOgg = makeConverter convertFile
     where
       convertFile basefile finalpath finalHandle mvb =
           do
-            createNamedPipe wavPath (unionFileModes ownerReadMode ownerWriteMode)
-            forkIO ((system ("oggdec " ++ basefile ++ " -o " ++ wavPath)) >> return ())
-            system ("lame  " ++ wavPath ++ " " ++ finalpath)
-            removeLink wavPath
-            hSeek finalHandle AbsoluteSeek 0
-            putMVar mvb True
+            wavPath <- mp3GetTempPipe
+            liftIO (do
+                      (forkIO ((system ("oggdec " ++ basefile ++ " -o " ++ wavPath)) >> return ()))
+                      system ("lame  " ++ wavPath ++ " " ++ finalpath)
+                      removeLink wavPath
+                      hSeek finalHandle AbsoluteSeek 0
+                      putMVar mvb True
+                   )
             return ()
-          where
-            wavPath = replaceExtension finalpath ".wav"
 
-mp3Converter = Mp3Converter { testIfActive = \() -> filterM [canFindExereturn True,
+oggConverter = Mp3Converter { ext = ".ogg",
+                              testIfActive = \() -> ((liftM2 (&&)) (canFindExecutable "lame") (canFindExecutable "oggdec")),
                               converterFunc = convertMp3
                             }
 
@@ -80,21 +85,34 @@ mp3Converter = Mp3Converter { testIfActive = \() -> filterM [canFindExereturn Tr
 convertWav :: FilePath -> Mp3fsM ConvertedFile
 convertWav = makeConverter convertFile
     where
-      convertFile basefile finalpath finalHandle mvb =
-          do
-            system ("lame  " ++ basefile ++ " " ++ finalpath)
-            hSeek finalHandle AbsoluteSeek 0
-            putMVar mvb True
-            return ()
+      convertFile basefile finalpath finalHandle mvb = liftIO
+                                                       (do
+                                                          system ("lame  " ++ basefile ++ " " ++ finalpath)
+                                                          hSeek finalHandle AbsoluteSeek 0
+                                                          putMVar mvb True
+                                                          return ()
+                                                       )
 
-wavConverter = Mp3Converter { testIfActive = canFindExecutable "lame",
+wavConverter = Mp3Converter { ext = ".wav",
+                              testIfActive = \() -> canFindExecutable "lame",
                               converterFunc = convertWav
                             }
 
 
 
-musicConverters = fromList [ (".ogg", convertOgg ), (".mp3", convertMp3 ), (".wav", convertWav) ]
-musicExtensions = keys musicConverters
+musicConverters = [wavConverter, oggConverter, mp3Converter]
 mp3FormatExtension = ".mp3"
 
-getMp3Converters
+getMp3Converters = (filterM (\x -> ((testIfActive x) ()) ) musicConverters) >>= (\x -> (mapM converterToExtFuncPair x))
+    where
+      converterToExtFuncPair conv = return (ext conv, converterFunc conv)
+
+getFileHandleOrNothing :: FilePath -> Mp3fsM (Maybe Handle)
+getFileHandleOrNothing path = (liftIO getHandle)
+    where
+      getHandle =
+          do
+            h <- (openFile path ReadMode)
+            return (Just h)
+          `catch`
+          \e -> return Nothing

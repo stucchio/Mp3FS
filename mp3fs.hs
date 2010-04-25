@@ -43,19 +43,14 @@ getAbsoluteRoot rootdir = -- Turns the rootdir into an absolute path. If rootdir
           pwd <- getEnv "PWD"
           return $ (combine pwd rootdir)
 
-runReaderT1 f r = \x -> runReaderT (f x) r
-runReaderT2 f r = \x -> \y -> runReaderT (f x y) r
-runReaderT3 f r = \x -> \y -> \z -> runReaderT (f x y z) r
-runReaderT4 f r = \x -> \y -> \z -> \t -> runReaderT (f x y z t) r
-
 mp3fsOps :: Mp3fsInternalData -> FuseOperations HT
-mp3fsOps internal = defaultFuseOps { fuseGetFileStat = runReaderT1 mp3GetFileStat internal
+mp3fsOps internal = defaultFuseOps { fuseGetFileStat = runMp3fsM1 mp3GetFileStat internal
                                    , fuseRead        = mp3Read internal
-                                   , fuseOpen        = runReaderT3 mp3OpenFile internal
-                                   , fuseOpenDirectory = runReaderT1 mp3OpenDirectory internal
-                                   , fuseReadDirectory = \x -> runReaderT (mp3ReadDirectory x) internal
+                                   , fuseOpen        = runMp3fsM3 mp3OpenFile internal
+                                   , fuseOpenDirectory = runMp3fsM1 mp3OpenDirectory internal
+                                   , fuseReadDirectory = \x -> runMp3fsM (mp3ReadDirectory x) internal
                                    , fuseGetFileSystemStats = helloGetFileSystemStats
-                                   , fuseDestroy = runReaderT mp3Destroy internal
+                                   , fuseDestroy = runMp3fsM1 mp3Destroy internal
                                    }
 
 helloString :: B.ByteString

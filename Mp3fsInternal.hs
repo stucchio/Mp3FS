@@ -7,8 +7,13 @@ module Mp3fsInternal
     , mp3TempDir
     , initInternalData
     , getConvertedHandle
-    , mp3OpenFile
     , mp3GetTempFile
+    , mp3GetTempPipe
+    , runMp3fsM
+    , runMp3fsM1
+    , runMp3fsM2
+    , runMp3fsM3
+    , runMp3fsM4
     ) where
 
 import Control.Concurrent.MVar
@@ -16,6 +21,7 @@ import Data.Map( fromList, member, empty, Map, (!), insert, keys)
 import System.Unix.Directory (mkdtemp, removeRecursiveSafely)
 import System.IO
 import System.FilePath.Posix
+import System.Posix.Files
 import System.Directory
 import Control.Monad
 import Control.Monad.Reader
@@ -40,18 +46,15 @@ data ConvertedFile = ConvertedFile { -- The data type of a file which we have
 type Mp3fsM a = ReaderT Mp3fsInternalData IO a
 type Mp3ConverterFunc = FilePath -> Mp3fsM ConvertedFile
 
+runMp3fsM f r = runReaderT f r
+runMp3fsM1 f r = \x -> runReaderT (f x) r
+runMp3fsM2 f r = \x -> \y -> runReaderT (f x y) r
+runMp3fsM3 f r = \x -> \y -> \z -> runReaderT (f x y z) r
+runMp3fsM4 f r = \x -> \y -> \z -> \t -> runReaderT (f x y z t) r
+
 
 mp3TempDir = ask >>= \x -> return (tempdir x)
 
-mp3OpenFile :: FilePath -> Mp3fsM (Maybe Handle)
-mp3OpenFile path = (liftIO getHandle)
-    where
-      getHandle =
-          do
-            h <- (openFile path ReadMode)
-            return (Just h)
-          `catch`
-          \e -> return Nothing
 
 
 
@@ -85,6 +88,15 @@ getNextTempCount =
       countMV <- (liftM tempfilecount) ask
       result <- liftIO (modifyMVar countMV (\x -> return (x, x+1) ))
       return result
+
+mp3GetTempPipe :: Mp3fsM String
+mp3GetTempPipe =
+    do
+      count <- getNextTempCount
+      td <- mp3TempDir
+      pipename <- return (combine td (show count))
+      liftIO (createNamedPipe pipename (unionFileModes ownerReadMode ownerWriteMode))
+      return pipename
 
 mp3GetTempFile :: Mp3fsM (FilePath, Handle)
 mp3GetTempFile =
