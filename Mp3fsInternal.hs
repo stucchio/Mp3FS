@@ -9,6 +9,11 @@ module Mp3fsInternal
     , getConvertedHandle
     , mp3GetTempFile
     , mp3GetTempPipe
+    , mp3GetConverter
+    , mp3PossibleBaseNames
+    , mp3FilesToConvert
+    , mp3IsMusicFile
+    , mp3FilterMusicFiles
     , runMp3fsM
     , runMp3fsM1
     , runMp3fsM2
@@ -55,8 +60,34 @@ runMp3fsM4 f r = \x -> \y -> \z -> \t -> runReaderT (f x y z t) r
 
 mp3TempDir = ask >>= \x -> return (tempdir x)
 
+possibleExtensions :: Mp3fsM [String]
+possibleExtensions = (liftM (keys . converters)) ask
 
+mp3FilterMusicFiles files =
+    do
+      converters <- (liftM converters) ask
+      return (filter (\x -> (member (takeExtension x) converters)) files)
 
+mp3PossibleBaseNames :: FilePath -> Mp3fsM [FilePath]
+mp3PossibleBaseNames file =
+    do
+      extensions <- possibleExtensions
+      return (map (replaceExtension file) extensions )
+
+mp3FilesToConvert :: FilePath -> Mp3fsM (Maybe FilePath)
+mp3FilesToConvert file = (mp3PossibleBaseNames file) >>= (filterM (\x -> liftIO (fileExist x)) ) >>= headOrNothing
+    where
+      headOrNothing [] = return Nothing
+      headOrNothing (f:fs) = return (Just f)
+
+mp3GetConverter :: String -> Mp3fsM Mp3ConverterFunc
+mp3GetConverter ext =
+    do
+      convertersMap <- (liftM converters) ask
+      return (convertersMap ! ext)
+
+mp3IsMusicFile :: FilePath -> Mp3fsM Bool
+mp3IsMusicFile file = (liftM converters) ask >>= \x -> return (member (takeExtension file) x)
 
 instance Show ConvertedFile where
     show ConversionFailure = "ConversionFailure"
@@ -65,11 +96,12 @@ instance Show ConvertedFile where
     show ConvertedFile { name = nm, handle = Just h } = "Converted file: { name = " ++ nm ++ ", has handle}"
 
 
-getConvertedHandle ConvertedFile { handle = Just h, complete = c} = (readMVar c) >> return h
-getConvertedHandle ConvertedFile { handle = Nothing, convertedPath = cp, complete = c } = (readMVar c) >> openFile cp ReadMode
+getConvertedHandle :: ConvertedFile -> Mp3fsM Handle
+getConvertedHandle ConvertedFile { handle = Just h, complete = c} = (liftIO (readMVar c)) >> return h
+getConvertedHandle ConvertedFile { handle = Nothing, convertedPath = cp, complete = c } = (liftIO (readMVar c)) >> liftIO (openFile cp ReadMode)
 
 
-initInternalData :: FilePath -> Map String Mp3ConverterFunc -> IO Mp3fsInternalData
+initInternalData :: FilePath -> (Map String Mp3ConverterFunc) -> IO Mp3fsInternalData
 initInternalData root converters = do
   convfiles <- newMVar (fromList [])
   mainTempDir <- getTemporaryDirectory
@@ -98,12 +130,11 @@ mp3GetTempPipe =
       liftIO (createNamedPipe pipename (unionFileModes ownerReadMode ownerWriteMode))
       return pipename
 
-mp3GetTempFile :: Mp3fsM (FilePath, Handle)
-mp3GetTempFile =
+mp3GetTempFile :: FilePath -> Mp3fsM (FilePath, Handle)
+mp3GetTempFile filepath =
     do
-      count <- getNextTempCount
       td <- mp3TempDir
-      (finalPath, finalHandle) <- liftIO (openTempFile td ("converted_file_" ++ (show count) ++ ".mp3"))
+      (finalPath, finalHandle) <- liftIO (openTempFile td (takeFileName filepath))
       return (finalPath, finalHandle)
 
 

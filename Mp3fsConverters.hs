@@ -49,7 +49,7 @@ mp3Converter = Mp3Converter { ext = ".mp3",
 
 makeConverter convertFile path =
     do
-      (finalPath, finalHandle) <- mp3GetTempFile
+      (finalPath, finalHandle) <- mp3GetTempFile path
       mvb <- liftIO newEmptyMVar
       internal <- ask
       liftIO (forkIO ((runMp3fsM4 convertFile internal) path finalPath finalHandle mvb ))
@@ -78,7 +78,7 @@ convertOgg = makeConverter convertFile
 
 oggConverter = Mp3Converter { ext = ".ogg",
                               testIfActive = \() -> ((liftM2 (&&)) (canFindExecutable "lame") (canFindExecutable "oggdec")),
-                              converterFunc = convertMp3
+                              converterFunc = convertOgg
                             }
 
 

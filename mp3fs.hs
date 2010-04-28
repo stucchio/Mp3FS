@@ -29,7 +29,8 @@ main :: IO ()
 main = do
   args <- getArgs
   rootdir <- getAbsoluteRoot (head args)
-  internal <- initInternalData rootdir
+  converters <- getMp3Converters
+  internal <- (initInternalData rootdir (fromList converters))
   loc <- findExecutable "lame"
   withArgs (tail args) (fuseMain (mp3fsOps internal) defaultExceptionHandler)
 
@@ -45,12 +46,12 @@ getAbsoluteRoot rootdir = -- Turns the rootdir into an absolute path. If rootdir
 
 mp3fsOps :: Mp3fsInternalData -> FuseOperations HT
 mp3fsOps internal = defaultFuseOps { fuseGetFileStat = runMp3fsM1 mp3GetFileStat internal
-                                   , fuseRead        = mp3Read internal
+                                   , fuseRead        = runMp3fsM4 mp3Read internal
                                    , fuseOpen        = runMp3fsM3 mp3OpenFile internal
                                    , fuseOpenDirectory = runMp3fsM1 mp3OpenDirectory internal
                                    , fuseReadDirectory = \x -> runMp3fsM (mp3ReadDirectory x) internal
                                    , fuseGetFileSystemStats = helloGetFileSystemStats
-                                   , fuseDestroy = runMp3fsM1 mp3Destroy internal
+                                   , fuseDestroy = runMp3fsM mp3Destroy internal
                                    }
 
 helloString :: B.ByteString
@@ -95,13 +96,13 @@ fileStat ctx = FileStat { statEntryType = RegularFile
                         }
 
 
-mp3OpenFile :: FilePath -> OpenMode -> OpenFileFlags -> ReaderT Mp3fsInternalData IO (Either Errno HT)
+mp3OpenFile :: FilePath -> OpenMode -> OpenFileFlags -> Mp3fsM (Either Errno HT)
 mp3OpenFile path WriteOnly _ = return (Left ePERM)
 mp3OpenFile _    ReadWrite _ = return (Left ePERM)
 mp3OpenFile path ReadOnly flags  = do
   internal <- ask
   convertedFile <- getConvertedFileR path
-  ecode <- liftIO (exitCode convertedFile)
+  ecode <- (exitCode convertedFile)
   return ecode
     where
       exitCode ConversionFailure = return (Left eNOENT)
@@ -123,7 +124,7 @@ convertedFileStat ConvertedFile { convertedPath = cp, complete = c} =
     where
       statusOfExistingFile = getFileStatus cp >>= \status -> return (Right (fileStatusToFileStat status))
 
-mp3GetFileStat :: FilePath -> ReaderT Mp3fsInternalData IO (Either Errno FileStat)
+mp3GetFileStat :: FilePath -> Mp3fsM (Either Errno FileStat)
 mp3GetFileStat path =
     do
       pathToFile <- makeAbsPathRelativeToRootR path
@@ -139,7 +140,7 @@ mp3GetFileStat path =
                stat <- liftIO (convertedFileStat convFile)
                return stat
 
-mp3OpenDirectory :: FilePath -> ReaderT Mp3fsInternalData IO Errno
+mp3OpenDirectory :: FilePath -> Mp3fsM Errno
 mp3OpenDirectory path =
     do
       basePathToRead <- makeAbsPathRelativeToRootR path
@@ -183,29 +184,7 @@ makeAbsPathRelativeToRoot internal path = (combine root (makeRelative "/" path) 
       root = (rootdir internal)
 
 
-getConvertedFile internal filepath =
-    do
-      convertedfilemap <- takeMVar (convertedFiles internal)
-      if (member filepath convertedfilemap)
-          then do
-                putbackfilemap convertedfilemap
-                return (convertedfilemap ! filepath)
-          else do
-                pathsToCheck <- filterM fileExist possiblePaths
-                if pathsToCheck == []
-                   then do
-                         putbackfilemap convertedfilemap
-                         return FileDoesNotExist
-                   else
-                       do
-                         convertedFile <- (musicConverters ! (takeExtension (head pathsToCheck))) internal (head pathsToCheck)
-                         putbackfilemap (insert filepath convertedFile convertedfilemap)
-                         return convertedFile
-    where
-      putbackfilemap = putMVar (convertedFiles internal)
-      possiblePaths = map (\x -> replaceExtension ((makeAbsPathRelativeToRoot internal) filepath) x) musicExtensions
-
-getConvertedFileR :: FilePath -> ReaderT Mp3fsInternalData IO ConvertedFile
+getConvertedFileR :: FilePath -> Mp3fsM ConvertedFile
 getConvertedFileR filepath =
     do
       convertedFilesMVar <- (liftM convertedFiles) ask
@@ -216,35 +195,28 @@ getConvertedFileR filepath =
                 return (convertedfilemap ! filepath)
           else do
                 absFilePath <- makeAbsPathRelativeToRootR filepath
-                pathsToCheck <- liftIO (filterM fileExist (map (\x -> replaceExtension absFilePath x) musicExtensions))
-                if pathsToCheck == []
-                   then do
-                         liftIO (putMVar convertedFilesMVar convertedfilemap)
-                         return FileDoesNotExist
-                   else
+                fileToConvert <- mp3FilesToConvert absFilePath
+                case fileToConvert of
+                  Nothing ->
+                      do
+                        liftIO (putMVar convertedFilesMVar convertedfilemap)
+                        return FileDoesNotExist
+                  Just path ->
                        do
-                         internal <- ask
-                         convertedFile <- liftIO ((musicConverters ! (takeExtension (head pathsToCheck))) internal (head pathsToCheck))
+                         converter <- mp3GetConverter (takeExtension path)
+                         convertedFile <- converter path
                          liftIO (putMVar convertedFilesMVar (insert filepath convertedFile convertedfilemap))
                          return convertedFile
 
 
 
 
-isMusicFileOrDir :: FilePath -> IO Bool
-isMusicFileOrDir x = (liftM2 (||)) (isMusicFile x) (isFilePathDirectory x)
-
-isMusicFile :: FilePath -> IO Bool
-isMusicFile x = (liftM (&& (member ext musicConverters)) ) (doesFileExist x)
-    where ext = (takeExtension x)
 
 isFilePathDirectory :: FilePath -> IO Bool
 isFilePathDirectory x = doesDirectoryExist x
 
-filterMusicFiles :: FilePath -> [FilePath] -> IO [FilePath]
-filterMusicFiles rootdir filenames = filterM (\file -> isMusicFile (combine rootdir file)) filenames
 
-mp3ReadDirectory :: FilePath -> ReaderT Mp3fsInternalData IO (Either Errno [(FilePath, FileStat)])
+mp3ReadDirectory :: FilePath -> Mp3fsM (Either Errno [(FilePath, FileStat)])
 mp3ReadDirectory path = do
   basePathToRead <- makeAbsPathRelativeToRootR path
   exists <- liftIO (doesDirectoryExist basePathToRead)
@@ -254,7 +226,7 @@ mp3ReadDirectory path = do
            root <- (liftM rootdir) ask
            ctx <- liftIO $ getFuseContext
            baseDirectoryContents <- liftIO $ (getDirectoryContents basePathToRead )
-           musicContents <- liftIO $ filterMusicFiles basePathToRead baseDirectoryContents
+           musicContents <- mp3FilterMusicFiles baseDirectoryContents
            dirContents <- liftIO $ filterM (\x -> isFilePathDirectory (combine root x)) baseDirectoryContents
            musicStatus <- liftIO $ (sequence (map musicFileStatus (addBasePath basePathToRead musicContents)))
            dirStatus <- liftIO $ (sequence (map dirFileStatus (addBasePath basePathToRead dirContents)))
@@ -268,40 +240,17 @@ mp3ReadDirectory path = do
 
 
 
-mp3Read :: Mp3fsInternalData -> FilePath -> HT -> ByteCount -> FileOffset -> IO (Either Errno B.ByteString)
-mp3Read internal path _ byteCount offset =
+mp3Read :: FilePath -> HT -> ByteCount -> FileOffset -> Mp3fsM (Either Errno B.ByteString)
+mp3Read path _ byteCount offset =
     do
-      convFile <- getConvertedFile internal path
-      if ((takeExtension basePath) == mp3FormatExtension)
+      convFile <- getConvertedFileR path
+      if ((takeExtension path) == ".mp3")
         then do
-              putStrLn ("          READING FROM " ++ path)
               handle <- getConvertedHandle convFile
-              putStrLn ("          Got HANDLE " ++ path)
-              seek <- hSeek handle AbsoluteSeek (toInteger offset)
-              bytes <- hGet handle (fromIntegral (toInteger byteCount))
-              return $ Right bytes
-        else return $ Left eNOENT
-    where
-      basePath = makeAbsPathRelativeToRoot internal path
-
---THIS IS NOT REMOTELY FINISHED
-{-
-mp3GetConvertedFile :: Mp3fsInternalData -> FilePath -> IO Maybe ConvertedFile
-mp3GetConvertedFile config internal path =
-    do
-      datamap <- readMVar filemapMVar
-      cfile <- lookup path datamap
-      return cfile
-          where filemapMVar = convertedFiles internal
-                basePath = makeAbsPathRelativeToRoot config path
-                convertFileIfNecessary Just f = return f
-                convertFileIfNecessary Nothing =
-                    do
-                      map <- takeMVar filemapMVar
-                      cfile <- (lookup ext musicConverters) config path
-                          where
-                            ext = takeExtension path
--}
+              seek <- liftIO (hSeek handle AbsoluteSeek (toInteger offset))
+              bytes <- liftIO (hGet handle (fromIntegral (toInteger byteCount)))
+              return (Right bytes)
+        else return (Left eNOENT)
 
 
 helloGetFileSystemStats :: String -> IO (Either Errno FileSystemStats)
