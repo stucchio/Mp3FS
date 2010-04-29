@@ -49,7 +49,7 @@ mp3fsOps internal = defaultFuseOps { fuseGetFileStat = runMp3fsM1 mp3GetFileStat
                                    , fuseRead        = runMp3fsM4 mp3Read internal
                                    , fuseOpen        = runMp3fsM3 mp3OpenFile internal
                                    , fuseOpenDirectory = runMp3fsM1 mp3OpenDirectory internal
-                                   , fuseReadDirectory = \x -> runMp3fsM (mp3ReadDirectory x) internal
+                                   , fuseReadDirectory = runMp3fsM1 mp3ReadDirectory internal
                                    , fuseGetFileSystemStats = helloGetFileSystemStats
                                    , fuseDestroy = runMp3fsM mp3Destroy internal
                                    }
@@ -127,23 +127,23 @@ convertedFileStat ConvertedFile { convertedPath = cp, complete = c} =
 mp3GetFileStat :: FilePath -> Mp3fsM (Either Errno FileStat)
 mp3GetFileStat path =
     do
-      pathToFile <- makeAbsPathRelativeToRootR path
-      isdir <- liftIO (doesDirectoryExist pathToFile)
+      pathToFile <- makeAbsPathRelativeToRoot path
+      isdir <- liftIO $ doesDirectoryExist pathToFile
       if isdir
          then
              do
-               status <- liftIO (getFileStatus pathToFile)
+               status <- liftIO $ getFileStatus pathToFile
                return (Right (fileStatusToFileStat status) )
          else
              do
                convFile <- getConvertedFileR path
-               stat <- liftIO (convertedFileStat convFile)
+               stat <- liftIO $ convertedFileStat convFile
                return stat
 
 mp3OpenDirectory :: FilePath -> Mp3fsM Errno
 mp3OpenDirectory path =
     do
-      basePathToRead <- makeAbsPathRelativeToRootR path
+      basePathToRead <- makeAbsPathRelativeToRoot path
       isDir <- liftIO (doesDirectoryExist basePathToRead)
       if isDir then (return eOK) else (return eNOENT)
 
@@ -177,11 +177,10 @@ fileStatusToFileStat status =
 
 prependRootDirToList rootdir lst = map (combine rootdir) lst
 
-makeAbsPathRelativeToRootR path = ((liftM rootdir) ask) >>= \root -> return (combine root (makeRelative "/" path) )
-
-makeAbsPathRelativeToRoot internal path = (combine root (makeRelative "/" path) )
-    where
-      root = (rootdir internal)
+makeAbsPathRelativeToRoot path =
+    do
+      root <- mp3RootDir
+      return (combine root (makeRelative "/" path) )
 
 
 getConvertedFileR :: FilePath -> Mp3fsM ConvertedFile
@@ -194,7 +193,7 @@ getConvertedFileR filepath =
                 liftIO (putMVar convertedFilesMVar convertedfilemap)
                 return (convertedfilemap ! filepath)
           else do
-                absFilePath <- makeAbsPathRelativeToRootR filepath
+                absFilePath <- makeAbsPathRelativeToRoot filepath
                 fileToConvert <- mp3FilesToConvert absFilePath
                 case fileToConvert of
                   Nothing ->
@@ -218,16 +217,15 @@ isFilePathDirectory x = doesDirectoryExist x
 
 mp3ReadDirectory :: FilePath -> Mp3fsM (Either Errno [(FilePath, FileStat)])
 mp3ReadDirectory path = do
-  basePathToRead <- makeAbsPathRelativeToRootR path
+  basePathToRead <- makeAbsPathRelativeToRoot path
   exists <- liftIO (doesDirectoryExist basePathToRead)
   if exists
      then
          do
-           root <- (liftM rootdir) ask
            ctx <- liftIO $ getFuseContext
            baseDirectoryContents <- liftIO $ (getDirectoryContents basePathToRead )
            musicContents <- mp3FilterMusicFiles baseDirectoryContents
-           dirContents <- liftIO $ filterM (\x -> isFilePathDirectory (combine root x)) baseDirectoryContents
+           dirContents <- liftIO $ filterM (\x -> isFilePathDirectory (combine basePathToRead x)) baseDirectoryContents
            musicStatus <- liftIO $ (sequence (map musicFileStatus (addBasePath basePathToRead musicContents)))
            dirStatus <- liftIO $ (sequence (map dirFileStatus (addBasePath basePathToRead dirContents)))
            return (Right (musicStatus ++ dirStatus ++ [(".",          dirStat  ctx), ("..",          dirStat  ctx)]))

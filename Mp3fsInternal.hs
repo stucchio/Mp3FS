@@ -5,6 +5,7 @@ module Mp3fsInternal
     , Mp3fsM
     , Mp3ConverterFunc
     , mp3TempDir
+    , mp3RootDir
     , initInternalData
     , getConvertedHandle
     , mp3GetTempFile
@@ -113,6 +114,9 @@ initInternalData root converters = do
                              tempfilecount = count,
                              rootdir = root
                            }
+
+mp3RootDir :: Mp3fsM FilePath
+mp3RootDir = (liftM rootdir) ask
 
 getNextTempCount :: Mp3fsM Int
 getNextTempCount =

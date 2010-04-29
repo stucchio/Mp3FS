@@ -96,6 +96,17 @@ flacConverter = Mp3Converter { ext = ".flac",
                               converterFunc = convertViaWav (\basefile -> \wavpath -> ("flac -cd " ++ basefile ++ " > " ++ wavpath))
                             }
 
+aacConverter = Mp3Converter { ext = ".aac",
+                              testIfActive = \() -> ((liftM2 (&&)) (canFindExecutable "lame") (canFindExecutable "faad")),
+                              converterFunc = convertViaWav (\basefile -> \wavpath -> ("faad " ++ basefile ++ " -o " ++ wavpath))
+                            }
+
+mp4Converter = Mp3Converter { ext = ".mp4",
+                              testIfActive = \() -> ((liftM2 (&&)) (canFindExecutable "lame") (canFindExecutable "faad")),
+                              converterFunc = convertViaWav (\basefile -> \wavpath -> ("faad " ++ basefile ++ " -o " ++ wavpath))
+                            }
+
+
 convertWav :: FilePath -> Mp3fsM ConvertedFile
 convertWav = makeConverter convertFile
     where
@@ -114,7 +125,7 @@ wavConverter = Mp3Converter { ext = ".wav",
 
 
 
-musicConverters = [wavConverter, oggConverter, mp3Converter, flacConverter]
+musicConverters = [wavConverter, oggConverter, mp3Converter, flacConverter, mp4Converter, aacConverter]
 mp3FormatExtension = ".mp3"
 
 getMp3Converters = (filterM (\x -> ((testIfActive x) ()) ) musicConverters) >>= (\x -> (mapM converterToExtFuncPair x))
