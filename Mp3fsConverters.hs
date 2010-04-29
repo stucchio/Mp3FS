@@ -49,26 +49,27 @@ mp3Converter = Mp3Converter { ext = ".mp3",
 
 makeConverter convertFile path =
     do
-      (finalPath, finalHandle) <- mp3GetTempFile path
+      (finalPath, finalHandle) <- mp3GetTempFile (replaceExtension path ".mp3")
       mvb <- liftIO newEmptyMVar
       internal <- ask
-      liftIO (forkIO ((runMp3fsM4 convertFile internal) path finalPath finalHandle mvb ))
+      liftIO (forkIO ((runMp3fsM4 convertFile internal) (quoteForShell path) (quoteForShell finalPath) finalHandle mvb ))
       return ConvertedFile { name=path, handle = Just finalHandle, convertedPath = finalPath, complete = mvb}
+    where
+      quoteForShell s = "\"" ++ s ++ "\""
 
 {-
-convertOgg uses oggdec and lame to convert an ogg to mp3. Roughly equivalent to the following shell commands:
+convertViaWave is a general function.
 
-oggdec file.ogg
-lame --preset 192 -ms -h file.wav
+It takes one argument via command line (a function mapping input files to output files), which tells it how to convert a
+music file to a wav file. It then uses lame to convert the wave file to mp3.
 -}
-convertOgg :: FilePath -> Mp3fsM ConvertedFile
-convertOgg = makeConverter convertFile
+convertViaWav toWavCmdLine = makeConverter convertFile
     where
       convertFile basefile finalpath finalHandle mvb =
           do
             wavPath <- mp3GetTempPipe
             liftIO (do
-                      (forkIO ((system ("oggdec " ++ basefile ++ " -o " ++ wavPath)) >> return ()))
+                      (forkIO ((system (toWavCmdLine basefile wavPath)) >> return ()))
                       system ("lame  " ++ wavPath ++ " " ++ finalpath)
                       removeLink wavPath
                       hSeek finalHandle AbsoluteSeek 0
@@ -76,11 +77,24 @@ convertOgg = makeConverter convertFile
                    )
             return ()
 
+
+{-
+convertOgg uses oggdec and lame to convert an ogg to mp3. Roughly equivalent to the following shell commands:
+
+oggdec file.ogg
+lame --preset 192 -ms -h file.wav
+-}
 oggConverter = Mp3Converter { ext = ".ogg",
                               testIfActive = \() -> ((liftM2 (&&)) (canFindExecutable "lame") (canFindExecutable "oggdec")),
-                              converterFunc = convertOgg
+                              converterFunc = convertViaWav (\basefile -> \wavpath -> ("oggdec " ++ basefile ++ " -o " ++ wavpath))
                             }
 
+
+
+flacConverter = Mp3Converter { ext = ".flac",
+                              testIfActive = \() -> ((liftM2 (&&)) (canFindExecutable "lame") (canFindExecutable "flac")),
+                              converterFunc = convertViaWav (\basefile -> \wavpath -> ("flac -cd " ++ basefile ++ " > " ++ wavpath))
+                            }
 
 convertWav :: FilePath -> Mp3fsM ConvertedFile
 convertWav = makeConverter convertFile
@@ -100,7 +114,7 @@ wavConverter = Mp3Converter { ext = ".wav",
 
 
 
-musicConverters = [wavConverter, oggConverter, mp3Converter]
+musicConverters = [wavConverter, oggConverter, mp3Converter, flacConverter]
 mp3FormatExtension = ".mp3"
 
 getMp3Converters = (filterM (\x -> ((testIfActive x) ()) ) musicConverters) >>= (\x -> (mapM converterToExtFuncPair x))
