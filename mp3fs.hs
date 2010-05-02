@@ -45,68 +45,41 @@ getAbsoluteRoot rootdir = -- Turns the rootdir into an absolute path. If rootdir
           return $ (combine pwd rootdir)
 
 mp3fsOps :: Mp3fsInternalData -> FuseOperations HT
-mp3fsOps internal = defaultFuseOps { fuseGetFileStat = runMp3fsM1 mp3GetFileStat internal
-                                   , fuseRead        = runMp3fsM4 mp3Read internal
-                                   , fuseOpen        = runMp3fsM3 mp3OpenFile internal
+mp3fsOps internal = defaultFuseOps { fuseGetFileStat   = runMp3fsM1 mp3GetFileStat internal
+                                   , fuseRead          = runMp3fsM4 mp3Read internal
+                                   , fuseOpen          = runMp3fsM3 mp3OpenFile internal
+                                   , fuseRelease       = runMp3fsM2 mp3ReleaseFile internal
                                    , fuseOpenDirectory = runMp3fsM1 mp3OpenDirectory internal
                                    , fuseReadDirectory = runMp3fsM1 mp3ReadDirectory internal
-                                   , fuseGetFileSystemStats = helloGetFileSystemStats
-                                   , fuseDestroy = runMp3fsM mp3Destroy internal
+                                   , fuseDestroy       = runMp3fsM mp3Destroy internal
+                                   , fuseGetFileSystemStats = mp3GetFileSystemStats
                                    }
-
-helloString :: B.ByteString
-helloString = B.pack "Hello World, HFuse!\n"
-
-dirStat ctx = FileStat { statEntryType = Directory
-                       , statFileMode = foldr1 unionFileModes
-                                          [ ownerReadMode
-                                          , ownerExecuteMode
-                                          , groupReadMode
-                                          , groupExecuteMode
-                                          , otherReadMode
-                                          , otherExecuteMode
-                                          ]
-                       , statLinkCount = 2
-                       , statFileOwner = fuseCtxUserID ctx
-                       , statFileGroup = fuseCtxGroupID ctx
-                       , statSpecialDeviceID = 0
-                       , statFileSize = 4096
-                       , statBlocks = 1
-                       , statAccessTime = 0
-                       , statModificationTime = 0
-                       , statStatusChangeTime = 0
-                       }
-
-
-fileStat ctx = FileStat { statEntryType = RegularFile
-                        , statFileMode = foldr1 unionFileModes
-                                           [ ownerReadMode
-                                           , groupReadMode
-                                           , otherReadMode
-                                           ]
-                        , statLinkCount = 1
-                        , statFileOwner = fuseCtxUserID ctx
-                        , statFileGroup = fuseCtxGroupID ctx
-                        , statSpecialDeviceID = 0
-                        , statFileSize = fromIntegral $ B.length helloString
-                        , statBlocks = 1
-                        , statAccessTime = 0
-                        , statModificationTime = 0
-                        , statStatusChangeTime = 0
-                        }
-
 
 mp3OpenFile :: FilePath -> OpenMode -> OpenFileFlags -> Mp3fsM (Either Errno HT)
 mp3OpenFile path WriteOnly _ = return (Left ePERM)
 mp3OpenFile _    ReadWrite _ = return (Left ePERM)
 mp3OpenFile path ReadOnly flags  = do
   internal <- ask
-  convertedFile <- getConvertedFileR path
+  convertedFile <- getConvertedFile path
+  incReaders convertedFile
   ecode <- (exitCode convertedFile)
   return ecode
     where
       exitCode ConversionFailure = return (Left eNOENT)
       exitCode cf = (getConvertedHandle cf) >> return (Right ());
+
+mp3ReleaseFile path _ =
+    do
+      cf <- getConvertedFile path
+      count <- decReaders cf
+      (if (count == 0)
+       then liftIO (takeMVar (handle cf) >>= closeIfExists >> putMVar (handle cf) Nothing )
+       else return ())
+    where
+      closeIfExists h = case h of
+                          Nothing -> return ()
+                          Just h -> hClose h
+
 
 whenFileExists filename ifExist ifNotExist =
     do
@@ -136,7 +109,7 @@ mp3GetFileStat path =
                return (Right (fileStatusToFileStat status) )
          else
              do
-               convFile <- getConvertedFileR path
+               convFile <- getConvertedFile path
                stat <- liftIO $ convertedFileStat convFile
                return stat
 
@@ -177,40 +150,6 @@ fileStatusToFileStat status =
 
 prependRootDirToList rootdir lst = map (combine rootdir) lst
 
-makeAbsPathRelativeToRoot path =
-    do
-      root <- mp3RootDir
-      return (combine root (makeRelative "/" path) )
-
-
-getConvertedFileR :: FilePath -> Mp3fsM ConvertedFile
-getConvertedFileR filepath =
-    do
-      convertedFilesMVar <- (liftM convertedFiles) ask
-      convertedfilemap <- liftIO (takeMVar convertedFilesMVar)
-      if (member filepath convertedfilemap)
-          then do
-                liftIO (putMVar convertedFilesMVar convertedfilemap)
-                return (convertedfilemap ! filepath)
-          else do
-                absFilePath <- makeAbsPathRelativeToRoot filepath
-                fileToConvert <- mp3FilesToConvert absFilePath
-                case fileToConvert of
-                  Nothing ->
-                      do
-                        liftIO (putMVar convertedFilesMVar convertedfilemap)
-                        return FileDoesNotExist
-                  Just path ->
-                       do
-                         converter <- mp3GetConverter (takeExtension path)
-                         convertedFile <- converter path
-                         liftIO (putMVar convertedFilesMVar (insert filepath convertedFile convertedfilemap))
-                         return convertedFile
-
-
-
-
-
 isFilePathDirectory :: FilePath -> IO Bool
 isFilePathDirectory x = doesDirectoryExist x
 
@@ -228,7 +167,7 @@ mp3ReadDirectory path = do
            dirContents <- liftIO $ filterM (\x -> isFilePathDirectory (combine basePathToRead x)) baseDirectoryContents
            musicStatus <- liftIO $ (sequence (map musicFileStatus (addBasePath basePathToRead musicContents)))
            dirStatus <- liftIO $ (sequence (map dirFileStatus (addBasePath basePathToRead dirContents)))
-           return (Right (musicStatus ++ dirStatus ++ [(".",          dirStat  ctx), ("..",          dirStat  ctx)]))
+           return (Right (musicStatus ++ dirStatus ))
      else
          return (Left eNOENT)
     where
@@ -241,7 +180,7 @@ mp3ReadDirectory path = do
 mp3Read :: FilePath -> HT -> ByteCount -> FileOffset -> Mp3fsM (Either Errno B.ByteString)
 mp3Read path _ byteCount offset =
     do
-      convFile <- getConvertedFileR path
+      convFile <- getConvertedFile path
       if ((takeExtension path) == ".mp3")
         then do
               handle <- getConvertedHandle convFile
@@ -251,8 +190,8 @@ mp3Read path _ byteCount offset =
         else return (Left eNOENT)
 
 
-helloGetFileSystemStats :: String -> IO (Either Errno FileSystemStats)
-helloGetFileSystemStats str =
+mp3GetFileSystemStats :: String -> IO (Either Errno FileSystemStats)
+mp3GetFileSystemStats str =
   return $ Right $ FileSystemStats
     { fsStatBlockSize = 512
     , fsStatBlockCount = 1

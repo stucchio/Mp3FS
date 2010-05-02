@@ -15,6 +15,11 @@ module Mp3fsInternal
     , mp3FilesToConvert
     , mp3IsMusicFile
     , mp3FilterMusicFiles
+    , makeAbsPathRelativeToRoot
+    , newConvertedFile
+    , getConvertedFile
+    , incReaders
+    , decReaders
     , runMp3fsM
     , runMp3fsM1
     , runMp3fsM2
@@ -45,9 +50,34 @@ data Mp3fsInternalData = Mp3fsInternalData {
 data ConvertedFile = ConvertedFile { -- The data type of a file which we have
                                      name :: FilePath,
                                      convertedPath :: FilePath,
-                                     handle :: Maybe Handle,
-                                     complete :: MVar Bool
+                                     handle :: MVar (Maybe Handle),
+                                     complete :: MVar Bool,
+                                     numReaders :: MVar Int
                                    } | ConversionFailure | FileDoesNotExist
+
+newConvertedFile name path handle complete =
+    do
+      mvb <- (case complete of
+                Just c -> liftIO (newMVar c)
+                Nothing -> liftIO newEmptyMVar)
+      nr <- liftIO (newMVar 0)
+      mvh <- liftIO (newMVar handle)
+      return ConvertedFile {
+                            name = name,
+                            convertedPath = path,
+                            handle = mvh,
+                            complete = mvb,
+                            numReaders = nr
+                           }
+
+
+
+incReaders :: ConvertedFile -> Mp3fsM Int
+incReaders cf = liftIO (modifyMVar (numReaders cf) (\x -> return (x+1, x+1)))
+
+decReaders :: ConvertedFile -> Mp3fsM Int
+decReaders cf = liftIO (modifyMVar (numReaders cf) (\x -> return (x-1, x-1)))
+
 
 type Mp3fsM a = ReaderT Mp3fsInternalData IO a
 type Mp3ConverterFunc = FilePath -> Mp3fsM ConvertedFile
@@ -93,14 +123,23 @@ mp3IsMusicFile file = (liftM converters) ask >>= \x -> return (member (takeExten
 instance Show ConvertedFile where
     show ConversionFailure = "ConversionFailure"
     show FileDoesNotExist = "FileDoesNotExist"
-    show ConvertedFile { name = nm, handle = Nothing } = "Converted file: { name = " ++ nm ++ ", no handle}"
-    show ConvertedFile { name = nm, handle = Just h } = "Converted file: { name = " ++ nm ++ ", has handle}"
+    show ConvertedFile { name = nm } = "Converted file: { name = " ++ nm ++ "}"
 
 
 getConvertedHandle :: ConvertedFile -> Mp3fsM Handle
-getConvertedHandle ConvertedFile { handle = Just h, complete = c} = (liftIO (readMVar c)) >> return h
-getConvertedHandle ConvertedFile { handle = Nothing, convertedPath = cp, complete = c } = (liftIO (readMVar c)) >> liftIO (openFile cp ReadMode)
-
+getConvertedHandle ConvertedFile { handle = h, complete = c, convertedPath = path} =
+    do
+      liftIO (do
+                hndl <-  (takeMVar h)
+                case hndl of
+                  Nothing -> do
+                            handle <- openFile path ReadMode
+                            putMVar h (Just handle)
+                            return handle
+                  Just hd -> do
+                            putMVar h (Just hd)
+                            return hd
+             )
 
 initInternalData :: FilePath -> (Map String Mp3ConverterFunc) -> IO Mp3fsInternalData
 initInternalData root converters = do
@@ -142,3 +181,31 @@ mp3GetTempFile filepath =
       return (finalPath, finalHandle)
 
 
+makeAbsPathRelativeToRoot path =
+    do
+      root <- mp3RootDir
+      return (combine root (makeRelative "/" path) )
+
+getConvertedFile :: FilePath -> Mp3fsM ConvertedFile
+getConvertedFile filepath =
+    do
+      convertedFilesMVar <- (liftM convertedFiles) ask
+      convertedfilemap <- liftIO (takeMVar convertedFilesMVar)
+      if (member filepath convertedfilemap)
+          then do
+                liftIO (putMVar convertedFilesMVar convertedfilemap)
+                return (convertedfilemap ! filepath)
+          else do
+                absFilePath <- makeAbsPathRelativeToRoot filepath
+                fileToConvert <- mp3FilesToConvert absFilePath
+                case fileToConvert of
+                  Nothing ->
+                      do
+                        liftIO (putMVar convertedFilesMVar convertedfilemap)
+                        return FileDoesNotExist
+                  Just path ->
+                       do
+                         converter <- mp3GetConverter (takeExtension path)
+                         convertedFile <- converter path
+                         liftIO (putMVar convertedFilesMVar (insert filepath convertedFile convertedfilemap))
+                         return convertedFile

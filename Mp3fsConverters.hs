@@ -37,9 +37,7 @@ convertMp3 path =
       handle <- getFileHandleOrNothing path
       case handle of
         Nothing -> return ConversionFailure
-        Just h -> do
-          mvb <- liftIO (newMVar True)
-          return ConvertedFile { handle = Just h, name = path, complete = mvb, convertedPath = path }
+        Just h -> (newConvertedFile path path handle (Just True))
 
 
 mp3Converter = Mp3Converter { ext = ".mp3",
@@ -53,7 +51,8 @@ makeConverter convertFile path =
       mvb <- liftIO newEmptyMVar
       internal <- ask
       liftIO (forkIO ((runMp3fsM4 convertFile internal) (quoteForShell path) (quoteForShell finalPath) finalHandle mvb ))
-      return ConvertedFile { name=path, handle = Just finalHandle, convertedPath = finalPath, complete = mvb}
+      cf <- (newConvertedFile path finalPath (Just finalHandle) Nothing)
+      return cf {complete = mvb }
     where
       quoteForShell s = "\"" ++ s ++ "\""
 
