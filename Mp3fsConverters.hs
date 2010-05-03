@@ -39,7 +39,6 @@ convertMp3 path =
         Nothing -> return ConversionFailure
         Just h -> (newConvertedFile path path handle (Just True))
 
-
 mp3Converter = Mp3Converter { ext = ".mp3",
                               testIfActive = \() -> return True,
                               converterFunc = convertMp3
@@ -105,7 +104,6 @@ mp4Converter = Mp3Converter { ext = ".mp4",
                               converterFunc = convertViaWav (\basefile -> \wavpath -> ("faad " ++ basefile ++ " -o " ++ wavpath))
                             }
 
-
 convertWav :: FilePath -> Mp3fsM ConvertedFile
 convertWav = makeConverter convertFile
     where
@@ -121,8 +119,6 @@ wavConverter = Mp3Converter { ext = ".wav",
                               testIfActive = \() -> canFindExecutable "lame",
                               converterFunc = convertWav
                             }
-
-
 
 musicConverters = [wavConverter, oggConverter, mp3Converter, flacConverter, mp4Converter, aacConverter]
 mp3FormatExtension = ".mp3"

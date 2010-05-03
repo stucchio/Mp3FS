@@ -76,10 +76,8 @@ mp3ReleaseFile path _ =
        then liftIO (takeMVar (handle cf) >>= closeIfExists >> putMVar (handle cf) Nothing )
        else return ())
     where
-      closeIfExists h = case h of
-                          Nothing -> return ()
-                          Just h -> hClose h
-
+      closeIfExists Nothing = return ()
+      closeIfExists (Just h) = hClose h
 
 whenFileExists filename ifExist ifNotExist =
     do
@@ -153,7 +151,6 @@ prependRootDirToList rootdir lst = map (combine rootdir) lst
 isFilePathDirectory :: FilePath -> IO Bool
 isFilePathDirectory x = doesDirectoryExist x
 
-
 mp3ReadDirectory :: FilePath -> Mp3fsM (Either Errno [(FilePath, FileStat)])
 mp3ReadDirectory path = do
   basePathToRead <- makeAbsPathRelativeToRoot path
@@ -175,8 +172,6 @@ mp3ReadDirectory path = do
       dirFileStatus x = getFileStatus x >>= \s -> return ( takeFileName x, fileStatusToFileStat s)
       musicFileStatus x = getFileStatus x >>= \s -> return (replaceExtension (takeFileName x) mp3FormatExtension, fileStatusToFileStat s )
 
-
-
 mp3Read :: FilePath -> HT -> ByteCount -> FileOffset -> Mp3fsM (Either Errno B.ByteString)
 mp3Read path _ byteCount offset =
     do
@@ -188,7 +183,6 @@ mp3Read path _ byteCount offset =
               bytes <- liftIO (hGet handle (fromIntegral (toInteger byteCount)))
               return (Right bytes)
         else return (Left eNOENT)
-
 
 mp3GetFileSystemStats :: String -> IO (Either Errno FileSystemStats)
 mp3GetFileSystemStats str =

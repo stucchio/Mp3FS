@@ -37,7 +37,6 @@ import System.Directory
 import Control.Monad
 import Control.Monad.Reader
 
-
 data Mp3fsInternalData = Mp3fsInternalData {
                                             rootdir :: FilePath,
                                             convertedFiles :: MVar (Map FilePath ConvertedFile ),
@@ -70,14 +69,11 @@ newConvertedFile name path handle complete =
                             numReaders = nr
                            }
 
-
-
 incReaders :: ConvertedFile -> Mp3fsM Int
 incReaders cf = liftIO (modifyMVar (numReaders cf) (\x -> return (x+1, x+1)))
 
 decReaders :: ConvertedFile -> Mp3fsM Int
 decReaders cf = liftIO (modifyMVar (numReaders cf) (\x -> return (x-1, x-1)))
-
 
 type Mp3fsM a = ReaderT Mp3fsInternalData IO a
 type Mp3ConverterFunc = FilePath -> Mp3fsM ConvertedFile
@@ -87,7 +83,6 @@ runMp3fsM1 f r = \x -> runReaderT (f x) r
 runMp3fsM2 f r = \x -> \y -> runReaderT (f x y) r
 runMp3fsM3 f r = \x -> \y -> \z -> runReaderT (f x y z) r
 runMp3fsM4 f r = \x -> \y -> \z -> \t -> runReaderT (f x y z t) r
-
 
 mp3TempDir = ask >>= \x -> return (tempdir x)
 
@@ -124,7 +119,6 @@ instance Show ConvertedFile where
     show ConversionFailure = "ConversionFailure"
     show FileDoesNotExist = "FileDoesNotExist"
     show ConvertedFile { name = nm } = "Converted file: { name = " ++ nm ++ "}"
-
 
 getConvertedHandle :: ConvertedFile -> Mp3fsM Handle
 getConvertedHandle ConvertedFile { handle = h, complete = c, convertedPath = path} =
@@ -179,7 +173,6 @@ mp3GetTempFile filepath =
       td <- mp3TempDir
       (finalPath, finalHandle) <- liftIO (openTempFile td (takeFileName filepath))
       return (finalPath, finalHandle)
-
 
 makeAbsPathRelativeToRoot path =
     do
