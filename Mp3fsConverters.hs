@@ -16,42 +16,37 @@ import Control.Concurrent
 import Control.Monad.Reader
 import Control.Concurrent.MVar
 
-
-
 data Mp3Converter = Mp3Converter {
                                   ext :: String,
                                   testIfActive :: () -> IO Bool,
                                   converterFunc :: FilePath -> Mp3fsM ConvertedFile
                                   }
 
-canFindExecutable prog =
-    do
-      execLoc <- findExecutable prog
-      case execLoc of
-        Nothing -> return False
-        Just s -> return True
+canFindExecutable prog = do
+  execLoc <- findExecutable prog
+  case execLoc of
+    Nothing -> return False
+    Just s -> return True
 
 convertMp3 :: FilePath -> Mp3fsM ConvertedFile
-convertMp3 path =
-    do
-      handle <- getFileHandleOrNothing path
-      case handle of
-        Nothing -> return ConversionFailure
-        Just h -> (newConvertedFile path path handle (Just True))
+convertMp3 path = do
+  handle <- getFileHandleOrNothing path
+  case handle of
+    Nothing -> return ConversionFailure
+    Just h -> (newConvertedFile path path handle (Just True))
 
 mp3Converter = Mp3Converter { ext = ".mp3",
                               testIfActive = \() -> return True,
                               converterFunc = convertMp3
                             }
 
-makeConverter convertFile path =
-    do
-      (finalPath, finalHandle) <- mp3GetTempFile (replaceExtension path ".mp3")
-      mvb <- liftIO newEmptyMVar
-      internal <- ask
-      liftIO (forkIO ((runMp3fsM4 convertFile internal) (quoteForShell path) (quoteForShell finalPath) finalHandle mvb ))
-      cf <- (newConvertedFile path finalPath (Just finalHandle) Nothing)
-      return cf {complete = mvb }
+makeConverter convertFile path = do
+  (finalPath, finalHandle) <- mp3GetTempFile (replaceExtension path ".mp3")
+  mvb <- liftIO newEmptyMVar
+  internal <- ask
+  liftIO (forkIO ((runMp3fsM4 convertFile internal) (quoteForShell path) (quoteForShell finalPath) finalHandle mvb ))
+  cf <- (newConvertedFile path finalPath (Just finalHandle) Nothing)
+  return cf {complete = mvb }
     where
       quoteForShell s = "\"" ++ s ++ "\""
 
