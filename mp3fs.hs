@@ -22,7 +22,6 @@ import Control.Concurrent
 import Control.Monad
 import Control.Monad.Reader
 
-
 type HT = ()
 
 main :: IO ()
@@ -33,7 +32,6 @@ main = do
   internal <- (initInternalData rootdir (fromList converters))
   loc <- findExecutable "lame"
   withArgs (tail args) (fuseMain (mp3fsOps internal) defaultExceptionHandler)
-
 
 getAbsoluteRoot :: FilePath -> IO FilePath
 getAbsoluteRoot rootdir = -- Turns the rootdir into an absolute path. If rootdir is a relpath, prepends the current working directory.
@@ -68,16 +66,7 @@ mp3OpenFile path ReadOnly flags  = do
       exitCode ConversionFailure = return (Left eNOENT)
       exitCode cf = (getConvertedHandle cf) >> return (Right ());
 
-mp3ReleaseFile path _ =
-    do
-      cf <- getConvertedFile path
-      count <- decReaders cf
-      (if (count == 0)
-       then liftIO (takeMVar (handle cf) >>= closeIfExists >> putMVar (handle cf) Nothing )
-       else return ())
-    where
-      closeIfExists Nothing = return ()
-      closeIfExists (Just h) = hClose h
+mp3ReleaseFile path _ = getConvertedFile path >>= decReaders >> return ()
 
 whenFileExists filename ifExist ifNotExist =
     do
@@ -86,6 +75,7 @@ whenFileExists filename ifExist ifNotExist =
          then ifExist
          else return ifNotExist
 
+convertedFileStat :: ConvertedFile -> IO (Either Errno FileStat)
 convertedFileStat ConversionFailure = return (Left eNOENT)
 convertedFileStat FileDoesNotExist = return (Left eNOENT)
 convertedFileStat ConvertedFile { convertedPath = cp, complete = c} =
@@ -129,7 +119,6 @@ fileStatusToEntryType status
     | isSocket          status = Socket
     | otherwise                = Unknown
 
-
 fileStatusToFileStat :: FileStatus -> FileStat
 fileStatusToFileStat status =
     FileStat { statEntryType        = fileStatusToEntryType status
@@ -146,11 +135,6 @@ fileStatusToFileStat status =
              , statStatusChangeTime = statusChangeTime status
              }
 
-prependRootDirToList rootdir lst = map (combine rootdir) lst
-
-isFilePathDirectory :: FilePath -> IO Bool
-isFilePathDirectory x = doesDirectoryExist x
-
 mp3ReadDirectory :: FilePath -> Mp3fsM (Either Errno [(FilePath, FileStat)])
 mp3ReadDirectory path = do
   basePathToRead <- makeAbsPathRelativeToRoot path
@@ -161,7 +145,7 @@ mp3ReadDirectory path = do
            ctx <- liftIO $ getFuseContext
            baseDirectoryContents <- liftIO $ (getDirectoryContents basePathToRead )
            musicContents <- mp3FilterMusicFiles baseDirectoryContents
-           dirContents <- liftIO $ filterM (\x -> isFilePathDirectory (combine basePathToRead x)) baseDirectoryContents
+           dirContents <- liftIO $ filterM (\x -> doesDirectoryExist (combine basePathToRead x)) baseDirectoryContents
            musicStatus <- liftIO $ (sequence (map musicFileStatus (addBasePath basePathToRead musicContents)))
            dirStatus <- liftIO $ (sequence (map dirFileStatus (addBasePath basePathToRead dirContents)))
            return (Right (musicStatus ++ dirStatus ))

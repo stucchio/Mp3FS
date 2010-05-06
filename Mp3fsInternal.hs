@@ -77,7 +77,18 @@ incReaders :: ConvertedFile -> Mp3fsM Int
 incReaders cf = liftIO (modifyMVar (numReaders cf) (\x -> return (x+1, x+1)))
 
 decReaders :: ConvertedFile -> Mp3fsM Int
-decReaders cf = liftIO (modifyMVar (numReaders cf) (\x -> return (x-1, x-1)))
+decReaders cf =
+    do
+      count <- liftIO $ takeMVar (numReaders cf)
+      if (count == 1)
+          then liftIO $ (takeMVar (handle cf) >>= closeIfExists >> putMVar (handle cf) Nothing )
+          else return ()
+      liftIO $ putMVar (numReaders cf) (count - 1)
+      return (count - 1)
+    where
+      closeIfExists Nothing = return ()
+      closeIfExists (Just h) = hClose h
+
 
 type Mp3fsM a = ReaderT Mp3fsInternalData IO a
 type Mp3ConverterFunc = FilePath -> Mp3fsM ConvertedFile
