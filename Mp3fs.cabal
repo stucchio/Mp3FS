@@ -21,7 +21,8 @@ Executable mp3fs
                    process,
                    directory,
                    filepath,
-                   unix
+                   unix,
+                   time >= 1.1.4
   Hs-Source-Dirs:  .
   Ghc-Options:     -threaded
 
