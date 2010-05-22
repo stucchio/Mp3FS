@@ -98,6 +98,11 @@ mp4Converter = Mp3Converter { ext = ".mp4",
                               testIfActive = \() -> ((liftM2 (&&)) (canFindExecutable "lame") (canFindExecutable "faad")),
                               converterFunc = convertViaWav (\basefile -> \wavpath -> ("faad " ++ basefile ++ " -o " ++ wavpath))
                             }
+wmaConverter = Mp3Converter { ext = ".wma",
+                              testIfActive = \() -> ((liftM2 (&&)) (canFindExecutable "lame") (canFindExecutable "ffmpeg")),
+                              converterFunc = convertViaWav (\basefile -> \wavpath -> ("ffmpeg " ++ basefile ++" -aq " ++ basefile) )
+                            }
+
 
 convertWav :: FilePath -> Mp3fsM ConvertedFile
 convertWav = makeConverter convertFile
