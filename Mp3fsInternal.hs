@@ -17,9 +17,10 @@ module Mp3fsInternal
     , mp3FilterMusicFiles
     , makeAbsPathRelativeToRoot
     , newConvertedFile
-    , getConvertedFile
     , incReaders
     , decReaders
+    , withConvertedFile
+    , modifyConvertedFile
     , runMp3fsM
     , runMp3fsM1
     , runMp3fsM2
@@ -41,7 +42,7 @@ import Control.Monad.Reader
 
 data Mp3fsInternalData = Mp3fsInternalData {
                                             rootdir :: FilePath,
-                                            convertedFiles :: MVar (Map FilePath ConvertedFile ),
+                                            convertedFiles :: MVar (Map FilePath (MVar ConvertedFile)),
                                             converters :: Map String Mp3ConverterFunc,
                                             tempdir :: FilePath,
                                             tempfilecount :: MVar Int
@@ -51,10 +52,10 @@ data Mp3fsInternalData = Mp3fsInternalData {
 data ConvertedFile = ConvertedFile { -- The data type of a file which we have
                                      name :: FilePath,
                                      convertedPath :: FilePath,
-                                     handle :: MVar (Maybe Handle),
-                                     complete :: MVar Bool,
-                                     numReaders :: MVar Int,
-                                     lastAccess :: MVar UTCTime
+                                     handle :: Maybe Handle,
+                                     complete :: Bool,
+                                     numReaders :: Int,
+                                     lastAccess :: UTCTime
                                    } | ConversionFailure | FileDoesNotExist
 
 instance Show ConvertedFile where
@@ -63,43 +64,35 @@ instance Show ConvertedFile where
     show ConvertedFile { name = nm } = "Converted file: { name = " ++ nm ++ "}"
 
 newConvertedFile name path handle complete = do
-  mvb <- (case complete of
-            Just c -> liftIO (newMVar c)
-            Nothing -> liftIO newEmptyMVar)
-  nr <- liftIO (newMVar 0)
-  mvh <- liftIO (newMVar handle)
-  time <- liftIO (getCurrentTime >>= newMVar)
+  time <- liftIO getCurrentTime
   return ConvertedFile {
                         name = name,
                         convertedPath = path,
-                        handle = mvh,
-                        complete = mvb,
-                        numReaders = nr,
+                        handle = handle,
+                        complete = complete,
+                        numReaders = 0,
                         lastAccess = time
                        }
 
--- Used to update the last access time of a converted file.
-touchConvertedFile cf = liftIO (modifyMVar_ (lastAccess cf) (\x -> getCurrentTime))
+incReaders :: ConvertedFile -> Mp3fsM ConvertedFile
+incReaders cf = return cf { numReaders = (numReaders cf) + 1 }
 
-lastAccessTime cf = liftIO (readMVar (lastAccess cf))
-
-incReaders :: ConvertedFile -> Mp3fsM Int
-incReaders cf = liftIO (modifyMVar (numReaders cf) (\x -> return (x+1, x+1)))
-
-decReaders :: ConvertedFile -> Mp3fsM Int
+decReaders :: ConvertedFile -> Mp3fsM ConvertedFile
 decReaders cf = do
-  count <- liftIO $ takeMVar (numReaders cf)
-  if (count == 1)
-    then liftIO $ (takeMVar (handle cf) >>= closeIfExists >> putMVar (handle cf) Nothing )
-    else return ()
-  liftIO $ putMVar (numReaders cf) (count - 1)
-  return (count - 1)
+  if (newCount == 0)
+    then (do
+            liftIO $ closeIfExists (handle cf)
+            return cf { numReaders = newCount, handle = Nothing }
+         )
+    else return cf { numReaders = newCount }
     where
+      oldCount = numReaders cf
+      newCount = oldCount - 1
       closeIfExists Nothing = return ()
       closeIfExists (Just h) = hClose h
 
 type Mp3fsM a = ReaderT Mp3fsInternalData IO a
-type Mp3ConverterFunc = FilePath -> Mp3fsM ConvertedFile
+type Mp3ConverterFunc = FilePath -> Mp3fsM (MVar ConvertedFile)
 
 runMp3fsM  f r = runReaderT f r
 runMp3fsM1 f r = \x -> runReaderT (f x) r
@@ -135,18 +128,13 @@ mp3IsMusicFile file = (liftM converters) ask >>= \x -> return (member (takeExten
 
 
 getConvertedHandle :: ConvertedFile -> Mp3fsM Handle
-getConvertedHandle ConvertedFile { handle = h, complete = c, convertedPath = path} = do
+getConvertedHandle ConvertedFile { handle = hndl, complete = c, convertedPath = path} = do
   liftIO (do
-            hndl <-  (takeMVar h)
             case hndl of
-              Nothing -> do
-                        handle <- openFile path ReadMode
-                        putMVar h (Just handle)
-                        return handle
-              Just hd -> do
-                        putMVar h (Just hd)
-                        return hd
+              Nothing -> openFile path ReadMode
+              Just hd -> return hd
          )
+      where
 
 initInternalData :: FilePath -> (Map String Mp3ConverterFunc) -> IO Mp3fsInternalData
 initInternalData root converters = do
@@ -167,14 +155,14 @@ mp3RootDir = (liftM rootdir) ask
 getNextTempCount :: Mp3fsM Int
 getNextTempCount = do
   countMV <- (liftM tempfilecount) ask
-  result <- liftIO (modifyMVar countMV (\x -> return (x, x+1) ))
+  result <- liftIO (modifyMVar countMV (\x -> return (x+1, x) ))
   return result
 
 mp3GetTempPipe :: Mp3fsM String
 mp3GetTempPipe = do
   count <- getNextTempCount
   td <- mp3TempDir
-  pipename <- return (combine td (show count))
+  pipename <- return (combine td ("pipe_" ++ (show count)))
   liftIO (createNamedPipe pipename (unionFileModes ownerReadMode ownerWriteMode))
   return pipename
 
@@ -186,13 +174,29 @@ mp3GetTempFile filepath = do
 
 makeAbsPathRelativeToRoot path = mp3RootDir >>= \root -> return (combine root (makeRelative "/" path) )
 
-getConvertedFile :: FilePath -> Mp3fsM ConvertedFile
+
+withConvertedFile :: FilePath -> (ConvertedFile -> Mp3fsM a) -> Mp3fsM a
+withConvertedFile path func = do
+  cfmvar <- getConvertedFile path
+  cf <- liftIO $ takeMVar cfmvar
+  result <- func cf
+  liftIO $ putMVar cfmvar cf
+  return result
+
+modifyConvertedFile :: FilePath -> (ConvertedFile -> Mp3fsM (a, ConvertedFile)) -> Mp3fsM a
+modifyConvertedFile path func = do
+  cfmvar <- getConvertedFile path
+  cf <- liftIO $ takeMVar cfmvar
+  (result, newCf) <- func cf
+  liftIO $ putMVar cfmvar newCf
+  return result
+
+getConvertedFile :: FilePath -> Mp3fsM (MVar ConvertedFile)
 getConvertedFile filepath = do
   convertedFilesMVar <- (liftM convertedFiles) ask
   convertedfilemap <- liftIO (takeMVar convertedFilesMVar)
   if (member filepath convertedfilemap)
     then do
-        touchConvertedFile (convertedfilemap ! filepath)
         liftIO (putMVar convertedFilesMVar convertedfilemap)
         return (convertedfilemap ! filepath)
     else do
@@ -200,9 +204,12 @@ getConvertedFile filepath = do
         case fileToConvert of
           Nothing -> (do
                         liftIO (putMVar convertedFilesMVar convertedfilemap)
-                        return FileDoesNotExist )
+                        result <- liftIO $ newMVar FileDoesNotExist
+                        return result
+                     )
           Just path -> (do
                           converter <- mp3GetConverter (takeExtension path)
-                          convertedFile <- converter path
-                          liftIO (putMVar convertedFilesMVar (insert filepath convertedFile convertedfilemap))
-                          return convertedFile )
+                          cfmvar <- converter path
+                          liftIO (putMVar convertedFilesMVar (insert filepath cfmvar convertedfilemap))
+                          return cfmvar
+                       )

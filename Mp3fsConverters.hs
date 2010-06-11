@@ -19,7 +19,7 @@ import Control.Concurrent.MVar
 data Mp3Converter = Mp3Converter {
                                   ext :: String,
                                   testIfActive :: () -> IO Bool,
-                                  converterFunc :: FilePath -> Mp3fsM ConvertedFile
+                                  converterFunc :: FilePath -> Mp3fsM (MVar ConvertedFile)
                                   }
 
 canFindExecutable prog = do
@@ -28,25 +28,30 @@ canFindExecutable prog = do
     Nothing -> return False
     Just s -> return True
 
-convertMp3 :: FilePath -> Mp3fsM ConvertedFile
+convertMp3 :: FilePath -> Mp3fsM (MVar ConvertedFile)
 convertMp3 path = do
   handle <- getFileHandleOrNothing path
-  case handle of
-    Nothing -> return ConversionFailure
-    Just h -> (newConvertedFile path path handle (Just True))
+  cf <- case handle of
+          Nothing -> return ConversionFailure
+          Just h -> (newConvertedFile path path handle True)
+  cfmvar <- liftIO $ newMVar cf
+  return cfmvar
 
 mp3Converter = Mp3Converter { ext = ".mp3",
                               testIfActive = \() -> return True,
                               converterFunc = convertMp3
                             }
 
+{- makeConverter takes a conversion function and
+-}
+makeConverter :: (FilePath -> Handle -> MVar ConvertedFile -> Mp3fsM ()) -> (FilePath -> Mp3fsM (MVar ConvertedFile))
 makeConverter convertFile path = do
   (finalPath, finalHandle) <- mp3GetTempFile (replaceExtension path ".mp3")
-  mvb <- liftIO newEmptyMVar
+  cf <- (newConvertedFile path finalPath (Just finalHandle) False)
+  cfmvar <- liftIO $ newMVar cf
   internal <- ask
-  liftIO (forkIO ((runMp3fsM4 convertFile internal) (quoteForShell path) (quoteForShell finalPath) finalHandle mvb ))
-  cf <- (newConvertedFile path finalPath (Just finalHandle) Nothing)
-  return cf {complete = mvb }
+  t <- liftIO (forkOS ((runMp3fsM3 convertFile internal) path finalHandle cfmvar))
+  return cfmvar
     where
       quoteForShell s = "\"" ++ s ++ "\""
 
@@ -58,18 +63,20 @@ music file to a wav file. It then uses lame to convert the wave file to mp3.
 -}
 convertViaWav toWavCmdLine = makeConverter convertFile
     where
-      convertFile basefile finalpath finalHandle mvb =
+      convertFile basefile handle cfmvar =
           do
             wavPath <- mp3GetTempPipe
             liftIO (do
                       (forkIO ((system (toWavCmdLine basefile wavPath)) >> return ()))
-                      system ("lame  " ++ wavPath ++ " " ++ finalpath)
+                      cf <- readMVar cfmvar
+                      system ("lame  " ++ wavPath ++ " " ++ (enquote (convertedPath cf)))
                       removeLink wavPath
-                      hSeek finalHandle AbsoluteSeek 0
-                      putMVar mvb True
+                      hSeek handle AbsoluteSeek 0
+                      modifyMVar_ cfmvar (\cf -> return (cf { complete = True }))
                    )
             return ()
 
+enquote path = "\"" ++ path ++ "\""
 
 {-
 convertOgg uses oggdec and lame to convert an ogg to mp3. Roughly equivalent to the following shell commands:
@@ -79,24 +86,24 @@ lame --preset 192 -ms -h file.wav
 -}
 oggConverter = Mp3Converter { ext = ".ogg",
                               testIfActive = \() -> ((liftM2 (&&)) (canFindExecutable "lame") (canFindExecutable "oggdec")),
-                              converterFunc = convertViaWav (\basefile -> \wavpath -> ("oggdec " ++ basefile ++ " -o " ++ wavpath))
+                              converterFunc = convertViaWav (\basefile -> \wavpath -> ("oggdec " ++ (enquote basefile) ++ " -o " ++ (enquote wavpath)))
                             }
 
 
 
 flacConverter = Mp3Converter { ext = ".flac",
                               testIfActive = \() -> ((liftM2 (&&)) (canFindExecutable "lame") (canFindExecutable "flac")),
-                              converterFunc = convertViaWav (\basefile -> \wavpath -> ("flac -cd " ++ basefile ++ " > " ++ wavpath))
+                              converterFunc = convertViaWav (\basefile -> \wavpath -> ("flac -cd " ++ (enquote basefile) ++ " > " ++ (enquote wavpath)))
                             }
 
 aacConverter = Mp3Converter { ext = ".aac",
                               testIfActive = \() -> ((liftM2 (&&)) (canFindExecutable "lame") (canFindExecutable "faad")),
-                              converterFunc = convertViaWav (\basefile -> \wavpath -> ("faad " ++ basefile ++ " -o " ++ wavpath))
+                              converterFunc = convertViaWav (\basefile -> \wavpath -> ("faad " ++ basefile ++ " -o " ++ (enquote wavpath)))
                             }
 
 mp4Converter = Mp3Converter { ext = ".mp4",
                               testIfActive = \() -> ((liftM2 (&&)) (canFindExecutable "lame") (canFindExecutable "faad")),
-                              converterFunc = convertViaWav (\basefile -> \wavpath -> ("faad " ++ basefile ++ " -o " ++ wavpath))
+                              converterFunc = convertViaWav (\basefile -> \wavpath -> ("faad " ++ basefile ++ " -o " ++ (enquote wavpath)))
                             }
 wmaConverter = Mp3Converter { ext = ".wma",
                               testIfActive = \() -> ((liftM2 (&&)) (canFindExecutable "lame") (canFindExecutable "ffmpeg")),
@@ -104,16 +111,16 @@ wmaConverter = Mp3Converter { ext = ".wma",
                             }
 
 
-convertWav :: FilePath -> Mp3fsM ConvertedFile
+convertWav :: FilePath -> Mp3fsM (MVar ConvertedFile)
 convertWav = makeConverter convertFile
     where
-      convertFile basefile finalpath finalHandle mvb = liftIO
-                                                       (do
-                                                          system ("lame  " ++ basefile ++ " " ++ finalpath)
-                                                          hSeek finalHandle AbsoluteSeek 0
-                                                          putMVar mvb True
-                                                          return ()
-                                                       )
+      convertFile path handle cfmvar = liftIO (do
+                                                 cf <- readMVar cfmvar
+                                                 system ("lame  " ++ (enquote path) ++ " " ++ (enquote (convertedPath cf)))
+                                                 hSeek handle AbsoluteSeek 0
+                                                 modifyMVar_ cfmvar (\cf -> return (cf { complete = True }))
+                                                 return ()
+                                              )
 
 wavConverter = Mp3Converter { ext = ".wav",
                               testIfActive = \() -> canFindExecutable "lame",

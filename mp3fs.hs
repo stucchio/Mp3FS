@@ -56,17 +56,15 @@ mp3fsOps internal = defaultFuseOps { fuseGetFileStat   = runMp3fsM1 mp3GetFileSt
 mp3OpenFile :: FilePath -> OpenMode -> OpenFileFlags -> Mp3fsM (Either Errno HT)
 mp3OpenFile path WriteOnly _ = return (Left ePERM)
 mp3OpenFile _    ReadWrite _ = return (Left ePERM)
-mp3OpenFile path ReadOnly flags  = do
-  internal <- ask
-  convertedFile <- getConvertedFile path
-  incReaders convertedFile
-  ecode <- (exitCode convertedFile)
-  return ecode
+mp3OpenFile path ReadOnly flags  = modifyConvertedFile path openFileWorker
     where
-      exitCode ConversionFailure = return (Left eNOENT)
-      exitCode cf = (getConvertedHandle cf) >> return (Right ());
+      openFileWorker ConversionFailure = return ((Left eNOENT), ConversionFailure)
+      openFileWorker cf = do
+        cfNew <- incReaders cf
+        return (Right (), cfNew)
 
-mp3ReleaseFile path _ = getConvertedFile path >>= decReaders >> return ()
+mp3ReleaseFile path _ = modifyConvertedFile path (\cf -> (decReaders cf) >>=
+                                                         (\cfnew -> return ((), cf)))
 
 whenFileExists filename ifExist ifNotExist =
     do
@@ -78,9 +76,9 @@ whenFileExists filename ifExist ifNotExist =
 convertedFileStat :: ConvertedFile -> IO (Either Errno FileStat)
 convertedFileStat ConversionFailure = return (Left eNOENT)
 convertedFileStat FileDoesNotExist = return (Left eNOENT)
-convertedFileStat ConvertedFile { convertedPath = cp, complete = c} =
+convertedFileStat ConvertedFile { convertedPath = cp, complete = False } = return (Left eINPROGRESS)
+convertedFileStat ConvertedFile { convertedPath = cp, complete = True } =
     do
-      readMVar c
       whenFileExists cp statusOfExistingFile (Left eNOENT)
     where
       statusOfExistingFile = getFileStatus cp >>= \status -> return (Right (fileStatusToFileStat status))
@@ -95,11 +93,7 @@ mp3GetFileStat path =
              do
                status <- liftIO $ getFileStatus pathToFile
                return (Right (fileStatusToFileStat status) )
-         else
-             do
-               convFile <- getConvertedFile path
-               stat <- liftIO $ convertedFileStat convFile
-               return stat
+         else withConvertedFile path (\cf -> liftIO $ convertedFileStat cf)
 
 mp3OpenDirectory :: FilePath -> Mp3fsM Errno
 mp3OpenDirectory path =
@@ -157,16 +151,15 @@ mp3ReadDirectory path = do
       musicFileStatus x = getFileStatus x >>= \s -> return (replaceExtension (takeFileName x) mp3FormatExtension, fileStatusToFileStat s )
 
 mp3Read :: FilePath -> HT -> ByteCount -> FileOffset -> Mp3fsM (Either Errno B.ByteString)
-mp3Read path _ byteCount offset =
-    do
-      convFile <- getConvertedFile path
-      if ((takeExtension path) == ".mp3")
-        then do
-              handle <- getConvertedHandle convFile
-              seek <- liftIO (hSeek handle AbsoluteSeek (toInteger offset))
-              bytes <- liftIO (hGet handle (fromIntegral (toInteger byteCount)))
-              return (Right bytes)
-        else return (Left eNOENT)
+mp3Read path _ byteCount offset = withConvertedFile path readFile
+    where
+      readFile convFile = if ((takeExtension path) == ".mp3")
+                            then do
+                                  handle <- getConvertedHandle convFile
+                                  seek <- liftIO (hSeek handle AbsoluteSeek (toInteger offset))
+                                  bytes <- liftIO (hGet handle (fromIntegral (toInteger byteCount)))
+                                  return (Right bytes)
+                            else return (Left eNOENT)
 
 mp3GetFileSystemStats :: String -> IO (Either Errno FileSystemStats)
 mp3GetFileSystemStats str =
