@@ -32,7 +32,7 @@ import Control.Concurrent.MVar
 import Data.Map( fromList, member, empty, Map, (!), insert, keys)
 import System.Unix.Directory (mkdtemp, removeRecursiveSafely)
 import System.IO
-import Data.Time
+import Data.Time.Clock
 import System.FilePath.Posix
 import System.Posix.Files
 import System.Directory
@@ -45,7 +45,8 @@ data Mp3fsInternalData = Mp3fsInternalData {
                                             convertedFiles :: MVar (Map FilePath (MVar ConvertedFile)),
                                             converters :: Map String Mp3ConverterFunc,
                                             tempdir :: FilePath,
-                                            tempfilecount :: MVar Int
+                                            tempfilecount :: MVar Int,
+                                            cleanupDelay :: NominalDiffTime
                                             }
 
 
@@ -146,7 +147,8 @@ initInternalData root converters = do
                              tempdir = dir,
                              converters = converters,
                              tempfilecount = count,
-                             rootdir = root
+                             rootdir = root,
+                             cleanupDelay = 5*60
                            }
 
 mp3RootDir :: Mp3fsM FilePath
@@ -174,13 +176,13 @@ mp3GetTempFile filepath = do
 
 makeAbsPathRelativeToRoot path = mp3RootDir >>= \root -> return (combine root (makeRelative "/" path) )
 
-
 withConvertedFile :: FilePath -> (ConvertedFile -> Mp3fsM a) -> Mp3fsM a
 withConvertedFile path func = do
   cfmvar <- getConvertedFile path
   cf <- liftIO $ takeMVar cfmvar
   result <- func cf
-  liftIO $ putMVar cfmvar cf
+  time <- liftIO $ getCurrentTime
+  liftIO $ putMVar cfmvar ( cf { lastAccess = time } )
   return result
 
 modifyConvertedFile :: FilePath -> (ConvertedFile -> Mp3fsM (a, ConvertedFile)) -> Mp3fsM a
@@ -188,7 +190,8 @@ modifyConvertedFile path func = do
   cfmvar <- getConvertedFile path
   cf <- liftIO $ takeMVar cfmvar
   (result, newCf) <- func cf
-  liftIO $ putMVar cfmvar newCf
+  time <- liftIO $ getCurrentTime
+  liftIO $ putMVar cfmvar (newCf { lastAccess = time})
   return result
 
 getConvertedFile :: FilePath -> Mp3fsM (MVar ConvertedFile)
