@@ -31,6 +31,7 @@ main = do
   converters <- getMp3Converters
   internal <- (initInternalData rootdir (fromList converters))
   loc <- findExecutable "lame"
+  forkIO (runMp3fsM cleanupPeriodically internal)
   withArgs (tail args) (fuseMain (mp3fsOps internal) defaultExceptionHandler)
 
 getAbsoluteRoot :: FilePath -> IO FilePath

@@ -21,6 +21,7 @@ module Mp3fsInternal
     , decReaders
     , withConvertedFile
     , modifyConvertedFile
+    , cleanupPeriodically
     , runMp3fsM
     , runMp3fsM1
     , runMp3fsM2
@@ -29,24 +30,27 @@ module Mp3fsInternal
     ) where
 
 import Control.Concurrent.MVar
-import Data.Map( fromList, member, empty, Map, (!), insert, keys)
+import Control.Concurrent (threadDelay)
+import qualified Data.Map as Map --Data.Map( member, empty, Map, (!), insert, keys, findMin, null)
+import Data.Map ( (!) )
 import System.Unix.Directory (mkdtemp, removeRecursiveSafely)
 import System.IO
-import Data.Time.Clock
+import System.Time
 import System.FilePath.Posix
 import System.Posix.Files
 import System.Directory
 import Control.Monad
 import Control.Monad.Reader
-
+import qualified Control.Exception as E
 
 data Mp3fsInternalData = Mp3fsInternalData {
                                             rootdir :: FilePath,
-                                            convertedFiles :: MVar (Map FilePath (MVar ConvertedFile)),
-                                            converters :: Map String Mp3ConverterFunc,
+                                            convertedFiles :: MVar (Map.Map FilePath (MVar ConvertedFile)),
+                                            converters :: Map.Map String Mp3ConverterFunc,
                                             tempdir :: FilePath,
                                             tempfilecount :: MVar Int,
-                                            cleanupDelay :: NominalDiffTime
+                                            cleanupDelay :: Int, -- cleanup delay in seconds
+                                            cleanupList :: MVar (Map.Map ClockTime FilePath )
                                             }
 
 
@@ -56,8 +60,8 @@ data ConvertedFile = ConvertedFile { -- The data type of a file which we have
                                      handle :: Maybe Handle,
                                      complete :: Bool,
                                      numReaders :: Int,
-                                     lastAccess :: UTCTime
-                                   } | ConversionFailure | FileDoesNotExist
+                                     lastAccess :: ClockTime
+                                   } | ConversionFailure | FileDoesNotExist | ConversionDeleted
 
 instance Show ConvertedFile where
     show ConversionFailure = "ConversionFailure"
@@ -65,7 +69,7 @@ instance Show ConvertedFile where
     show ConvertedFile { name = nm } = "Converted file: { name = " ++ nm ++ "}"
 
 newConvertedFile name path handle complete = do
-  time <- liftIO getCurrentTime
+  time <- liftIO getClockTime
   return ConvertedFile {
                         name = name,
                         convertedPath = path,
@@ -104,11 +108,11 @@ runMp3fsM4 f r = \x -> \y -> \z -> \t -> runReaderT (f x y z t) r
 mp3TempDir = ask >>= \x -> return (tempdir x)
 
 possibleExtensions :: Mp3fsM [String]
-possibleExtensions = (liftM (keys . converters)) ask
+possibleExtensions = (liftM (Map.keys . converters)) ask
 
 mp3FilterMusicFiles files = do
   converters <- (liftM converters) ask
-  return (filter (\x -> (member (takeExtension x) converters)) files)
+  return (filter (\x -> (Map.member (takeExtension x) converters)) files)
 
 mp3PossibleBaseNames :: FilePath -> Mp3fsM [FilePath]
 mp3PossibleBaseNames file = do
@@ -125,7 +129,7 @@ mp3GetConverter :: String -> Mp3fsM Mp3ConverterFunc
 mp3GetConverter ext = (liftM converters) ask >>= \cmap -> return (cmap ! ext)
 
 mp3IsMusicFile :: FilePath -> Mp3fsM Bool
-mp3IsMusicFile file = (liftM converters) ask >>= \x -> return (member (takeExtension file) x)
+mp3IsMusicFile file = (liftM converters) ask >>= \x -> return (Map.member (takeExtension file) x)
 
 
 getConvertedHandle :: ConvertedFile -> Mp3fsM Handle
@@ -137,18 +141,20 @@ getConvertedHandle ConvertedFile { handle = hndl, complete = c, convertedPath = 
          )
       where
 
-initInternalData :: FilePath -> (Map String Mp3ConverterFunc) -> IO Mp3fsInternalData
+initInternalData :: FilePath -> (Map.Map String Mp3ConverterFunc) -> IO Mp3fsInternalData
 initInternalData root converters = do
-  convfiles <- newMVar (fromList [])
+  convfiles <- newMVar Map.empty
   mainTempDir <- getTemporaryDirectory
   dir <- mkdtemp (combine mainTempDir "mp3fsXXXXXX")
   count <- newMVar 0
+  cl <- liftIO $ newMVar Map.empty
   return Mp3fsInternalData { convertedFiles = convfiles,
                              tempdir = dir,
                              converters = converters,
                              tempfilecount = count,
                              rootdir = root,
-                             cleanupDelay = 5*60
+                             cleanupDelay = 5*60,
+                             cleanupList = cl
                            }
 
 mp3RootDir :: Mp3fsM FilePath
@@ -176,13 +182,27 @@ mp3GetTempFile filepath = do
 
 makeAbsPathRelativeToRoot path = mp3RootDir >>= \root -> return (combine root (makeRelative "/" path) )
 
+-- Puts the file path into the cleanup request queue.
+addCleanupRequest time path = do
+  (cl, delay)  <- ask >>= \internal -> return ( (cleanupList internal), (cleanupDelay internal) )
+  liftIO $ modifyMVar_ cl (\clist -> return (Map.insert (addSecondsToTime time (toInteger delay)) path clist))
+
+addSecondsToTime (TOD sec pico) delay = TOD (sec + delay) pico
+secDelayBetween (TOD sec1 _) (TOD sec2 _) = sec2 - sec1
+
+mapFilterM_ :: Monad m => (Ord k) => ((k,v) -> m Bool) -> (Map.Map k v) -> m (Map.Map k v)
+mapFilterM_ func mp = do
+  asLst <- return (Map.toList mp)
+  resultLst <- filterM func asLst
+  return (Map.fromList resultLst)
+
 withConvertedFile :: FilePath -> (ConvertedFile -> Mp3fsM a) -> Mp3fsM a
 withConvertedFile path func = do
   cfmvar <- getConvertedFile path
   cf <- liftIO $ takeMVar cfmvar
   result <- func cf
-  time <- liftIO $ getCurrentTime
-  liftIO $ putMVar cfmvar ( cf { lastAccess = time } )
+  time <- liftIO $ getClockTime
+  liftIO $ putMVar cfmvar (cf { lastAccess = time})
   return result
 
 modifyConvertedFile :: FilePath -> (ConvertedFile -> Mp3fsM (a, ConvertedFile)) -> Mp3fsM a
@@ -190,7 +210,7 @@ modifyConvertedFile path func = do
   cfmvar <- getConvertedFile path
   cf <- liftIO $ takeMVar cfmvar
   (result, newCf) <- func cf
-  time <- liftIO $ getCurrentTime
+  time <- liftIO $ getClockTime
   liftIO $ putMVar cfmvar (newCf { lastAccess = time})
   return result
 
@@ -198,10 +218,14 @@ getConvertedFile :: FilePath -> Mp3fsM (MVar ConvertedFile)
 getConvertedFile filepath = do
   convertedFilesMVar <- (liftM convertedFiles) ask
   convertedfilemap <- liftIO (takeMVar convertedFilesMVar)
-  if (member filepath convertedfilemap)
+  if (Map.member filepath convertedfilemap)
     then do
         liftIO (putMVar convertedFilesMVar convertedfilemap)
-        return (convertedfilemap ! filepath)
+        cfmvar <- return (convertedfilemap ! filepath)
+        cf <- liftIO $ readMVar cfmvar
+        case cf of -- If the file was deleted, we need to rebuild.
+          ConversionDeleted -> (getConvertedFile filepath)
+          _                 -> return cfmvar
     else do
         fileToConvert <- makeAbsPathRelativeToRoot filepath >>= mp3FilesToConvert
         case fileToConvert of
@@ -213,6 +237,40 @@ getConvertedFile filepath = do
           Just path -> (do
                           converter <- mp3GetConverter (takeExtension path)
                           cfmvar <- converter path
-                          liftIO (putMVar convertedFilesMVar (insert filepath cfmvar convertedfilemap))
+                          liftIO (putMVar convertedFilesMVar (Map.insert filepath cfmvar convertedfilemap))
                           return cfmvar
                        )
+
+cleanupPeriodically :: Mp3fsM ()
+cleanupPeriodically = forever $ do
+                        cleanupOutdatedFiles
+                        delay <- (liftM cleanupDelay) ask
+                        liftIO $ threadDelay delay
+
+cleanupOutdatedFiles :: Mp3fsM ()
+cleanupOutdatedFiles = do
+  convertedFilesMVar <- (liftM convertedFiles) ask
+  convertedfilemap <- liftIO (takeMVar convertedFilesMVar)
+  now <- liftIO $ getClockTime
+  delay <- (liftM cleanupDelay) ask
+  toDelete <- mapFilterM_ (staleFile now (toInteger delay) ) convertedfilemap
+  liftIO $ putMVar convertedFilesMVar (Map.difference convertedfilemap toDelete)
+  mapM deleteConvertedFile (Map.elems toDelete)
+  return ()
+    where
+      staleFile now delay (path, cfmvar) = do
+            cf <- liftIO $ readMVar cfmvar
+            case cf of
+              ConvertedFile { complete = True, lastAccess = t } -> return ((secDelayBetween t now) > delay)
+              _                                                 -> return False
+
+deleteConvertedFile :: MVar ConvertedFile -> Mp3fsM ()
+deleteConvertedFile cfmvar = do
+  cf <- liftIO $ takeMVar cfmvar
+  td <- (liftM tempdir) ask
+  if ((takeDirectory (convertedPath cf)) == td) -- Delete the file, but only if it is contained in our tempdir
+     then liftIO $ removeLink (convertedPath cf)
+     else return ()
+  case cf of
+    ConvertedFile { complete = True } -> (liftIO $ putMVar cfmvar ConversionDeleted)
+    _                                 -> (liftIO $ putMVar cfmvar cf)

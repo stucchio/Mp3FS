@@ -8,6 +8,7 @@ import Mp3fsInternal
 
 import System.Directory
 import System.IO
+import System.Time
 import System.FilePath.Posix
 import System.Posix.Files
 import System.Process
@@ -50,7 +51,7 @@ makeConverter convertFile path = do
   cf <- (newConvertedFile path finalPath (Just finalHandle) False)
   cfmvar <- liftIO $ newMVar cf
   internal <- ask
-  t <- liftIO (forkOS ((runMp3fsM3 convertFile internal) path finalHandle cfmvar))
+  liftIO (forkOS ((runMp3fsM3 convertFile internal) path finalHandle cfmvar))
   return cfmvar
     where
       quoteForShell s = "\"" ++ s ++ "\""
@@ -72,7 +73,8 @@ convertViaWav toWavCmdLine = makeConverter convertFile
                       system ("lame  " ++ wavPath ++ " " ++ (enquote (convertedPath cf)))
                       removeLink wavPath
                       hSeek handle AbsoluteSeek 0
-                      modifyMVar_ cfmvar (\cf -> return (cf { complete = True }))
+                      time <- liftIO $ getClockTime
+                      modifyMVar_ cfmvar (\cf -> return (cf { complete = True, lastAccess = time }))
                    )
             return ()
 
