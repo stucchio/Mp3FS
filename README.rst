@@ -45,28 +45,34 @@ Installation is the haskell standard::
 Requirements
 ------------
 You need the following haskell libraries:
-    Unixutils >= 1.2.2,
-    HFuse >= 0.2.1,
+
+* Unixutils >= 1.2.2,
+
+* HFuse >= 0.2.1,
 
 You also need the following command-line tools.
-    lame (required for all formats)
-    flac (required to convert flac files)
-    oggdec (required to convert ogg files)
-    faad (required for mp4 and aac files)
+
+* lame (required for all formats)
+
+* flac (required to convert flac files)
+
+* oggdec (required to convert ogg files)
+
+* faad (required for mp4 and aac files)
 
 If you lack some of these, mp3fs will degrade gracefully. If you lack lame, it just won't work.
 
 Some caveats:
 
-  * Obviously this is somewhat slow and CPU heavy.
+* Obviously this is somewhat slow and CPU heavy.
 
-  * Any calls to getfilestat (e.g., via ls -l in an mp3fs directory) will cause the file to be converted.
-    ls -l will be a VERY slow operation.
+* Any calls to getfilestat (e.g., via ls -l in an mp3fs directory) will cause the file to be converted.
+  `ls -l` will be a VERY slow operation.
 
-  * Nautilus (the Gnome file manager) will, by default, call getfilestat on all files contained in the
-    root of any newly mounted directory. The result is that when you mount an mp3fs filesystem, all files
-    will *immediately* be converted to mp3. This can be slow. This can be switched off via gconfeditor,
-    at the path /apps/nautilus/preferences/media_automount_open
+* Nautilus (the Gnome file manager) will, by default, call getfilestat on all files contained in the
+  root of any newly mounted directory. The result is that when you mount an mp3fs filesystem, all files
+  will *immediately* be converted to mp3. This can be slow. This can be switched off via gconfeditor,
+  at the path /apps/nautilus/preferences/media_automount_open
 
 Getting the code
 ================
