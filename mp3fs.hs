@@ -1,4 +1,6 @@
-module Main () where
+module Main (
+             main
+            ) where
 
 import Mp3fsInternal
 import Mp3fsConverters
